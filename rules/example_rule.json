@@ -1,0 +1,14 @@
+{
+    "rules": [
+        {
+            "id": 1,
+            "name": "示例规则",
+            "type": "signature",
+            "enabled": true,
+            "description": "这是一个示例规则文件",
+            "pattern": "",
+            "action": "alert",
+            "severity": "medium"
+        }
+    ]
+}
