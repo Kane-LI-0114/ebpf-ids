@@ -64,14 +64,16 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         
         // 提取 TCP payload
         __u32 payload_offset = l4_offset + (tcp.doff * 4);
-        __u32 payload_len = skb->len - payload_offset;
         
-        if (payload_len > 256)
-            payload_len = 256;
-        
-        if (payload_len > 0) {
+        // 确保 payload_len 非负
+        if (skb->len > payload_offset) {
+            __u32 payload_len = skb->len - payload_offset;
+            
+            if (payload_len > 256)
+                payload_len = 256;
+            
             evt->payload_len = payload_len;
-            bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
+            bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len & 0xff);
         } else {
             evt->payload_len = 0;
         }
@@ -85,14 +87,16 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         
         // 提取 UDP payload
         __u32 payload_offset = l4_offset + sizeof(struct udphdr);
-        __u32 payload_len = skb->len - payload_offset;
         
-        if (payload_len > 256)
-            payload_len = 256;
-        
-        if (payload_len > 0) {
+        // 确保 payload_len 非负
+        if (skb->len > payload_offset) {
+            __u32 payload_len = skb->len - payload_offset;
+            
+            if (payload_len > 256)
+                payload_len = 256;
+            
             evt->payload_len = payload_len;
-            bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
+            bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len & 0xff);
         } else {
             evt->payload_len = 0;
         }
