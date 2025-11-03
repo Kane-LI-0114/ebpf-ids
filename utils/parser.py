@@ -14,18 +14,20 @@ class SnortRuleParser:
     Supports: protocol, IPs, ports, direction, flags, msg, sid, content
     Does NOT support: complex content matching, payload inspection, flow state
     """
-    
     def __init__(self):
-        # Regular expression to parse rule header
+    # Regular expression to parse rule header
         self.header_re = re.compile(
-            r'^(\w+)\s+'                      # action: alert, log, pass, drop, reject
-            r'(\w+)\s+'                       # protocol: tcp, udp, icmp, ip
-            r'([\w\.\$/!,\[\]]+)\s+'          # source IP
-            r'([\w:,\[\]]+)\s+'               # source port
-            r'(<?-?>?)\s+'                    # direction: -> or <>
-            r'([\w\.\$/!,\[\]]+)\s+'          # dest IP
-            r'([\w:,\[\]]+)'                  # dest port
-        )
+        r'^(\w+)\s+' # action: alert, log, pass, drop, reject
+        r'([\w-]+)\s+' # protocol: tcp, udp, icmp, ip, http, ssl
+        r'([\w\.$/!,\[\]]+|\bany\b)\s+' # source IP - ADD / for CIDR notation
+        r'([!\w:,$/\[\]]+|\bany\b)\s+' # source port
+        r'(<>|->)\s+' # direction: -> or <>
+        r'([\w\.$/!,\[\]]+|\bany\b)\s+' # dest IP - ADD / for CIDR notation
+        r'([!\w:,$/\[\]]+|\bany\b)' # dest port
+    )
+
+
+
     
     def parse_file(self, filename):
         """Parse a Snort rules file and return list of intermediate representations"""
@@ -52,22 +54,37 @@ class SnortRuleParser:
             if '(' not in rule_line:
                 print(f"Warning: Rule has no options: {rule_line[:50]}...")
                 return None
+            
             header_part, options_part = rule_line.split('(', 1)
             options_part = options_part.rsplit(')', 1)[0]
         except ValueError:
             print(f"Error: Malformed rule: {rule_line[:50]}...")
             return None
         
-        # Parse header
+        # Parse header - try traditional format first
         match = self.header_re.match(header_part.strip())
+        
         if not match:
-            print(f"Error: Cannot parse header: {header_part[:50]}...")
-            return None
+            # Try simplified Snort3 format: action protocol (options)
+            simple_match = re.match(r'^(\w+)\s+([\w-]+)\s*$', header_part.strip())
+            
+            if simple_match:
+                action, protocol = simple_match.groups()
+                # Use defaults for simplified format
+                src_ip = 'any'
+                src_port = 'any'
+                direction = '->'
+                dst_ip = 'any'
+                dst_port = 'any'
+            else:
+                print(f"Error: Cannot parse header: {header_part[:50]}...")
+                return None
+        else:
+            action, protocol, src_ip, src_port, direction, dst_ip, dst_port = match.groups()
         
-        action, protocol, src_ip, src_port, direction, dst_ip, dst_port = match.groups()
-        
-        # Parse options
+        # Parse options (rest of the code remains the same)
         options = {}
+        
         for opt in options_part.split(';'):
             opt = opt.strip()
             if not opt:
@@ -78,7 +95,7 @@ class SnortRuleParser:
                 key = key.strip()
                 value = value.strip().strip('"')
                 
-                # Handle multiple values for same key (e.g., multiple references)
+                # Handle multiple values for same key
                 if key in options:
                     if not isinstance(options[key], list):
                         options[key] = [options[key]]
@@ -86,7 +103,7 @@ class SnortRuleParser:
                 else:
                     options[key] = value
             else:
-                # Options without values (e.g., "file_data")
+                # Options without values
                 options[opt] = True
         
         # Build intermediate representation
@@ -102,6 +119,7 @@ class SnortRuleParser:
         }
         
         return ir
+
     
     def to_ebpf_config(self, ir):
         """
