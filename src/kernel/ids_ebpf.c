@@ -72,8 +72,10 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
             if (payload_len > 256)
                 payload_len = 256;
             
-            evt->payload_len = payload_len;
-            bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len & 0xff);
+            if (payload_len > 0) {
+                evt->payload_len = payload_len;
+                bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
+            }
         } else {
             evt->payload_len = 0;
         }
@@ -95,8 +97,10 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
             if (payload_len > 256)
                 payload_len = 256;
             
-            evt->payload_len = payload_len;
-            bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len & 0xff);
+            if (payload_len > 0) {
+                evt->payload_len = payload_len;
+                bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
+            }
         } else {
             evt->payload_len = 0;
         }
