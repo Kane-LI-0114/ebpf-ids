@@ -9,8 +9,39 @@ import os
 import sys
 import json
 import signal
+import socket
+import fcntl
+import struct
+import array
 from bcc import BPF
 from datetime import datetime
+
+
+def get_active_interface():
+    """自动检测活动的网络接口"""
+    try:
+        # 读取 /proc/net/dev 获取所有网络接口
+        with open('/proc/net/dev', 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        interfaces = []
+        for line in lines[2:]:  # 跳过头两行
+            if ':' in line:
+                iface_name = line.split(':')[0].strip()
+                # 排除回环接口
+                if iface_name != 'lo':
+                    interfaces.append(iface_name)
+        
+        if interfaces:
+            # 返回第一个非回环接口
+            return interfaces[0]
+        
+        # 如果没有找到，返回默认值
+        return 'eth0'
+    
+    except Exception as e:
+        print(f"警告: 无法自动检测网络接口: {e}")
+        return 'eth0'
 
 
 class RuleManager:
@@ -102,9 +133,13 @@ class EventHandler:
 class IDSManager:
     """IDS 主管理类"""
     
-    def __init__(self, rules_dir, interface="eth0"):
+    def __init__(self, rules_dir, interface=None):
         self.rules_dir = rules_dir
-        self.interface = interface
+        # 如果没有指定接口，自动检测
+        if interface is None:
+            self.interface = get_active_interface()
+        else:
+            self.interface = interface
         self.bpf = None
         self.rule_manager = RuleManager(rules_dir)
         self.event_handler = None
@@ -139,10 +174,12 @@ class IDSManager:
             function_ids_filter = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
             BPF.attach_raw_socket(function_ids_filter, self.interface)
             print(f"✓ 已附加到 {self.interface}")
+            return True
         except Exception as e:
             print(f"✗ 附加探针失败: {e}")
             print(f"提示: 请确保网络接口 '{self.interface}' 存在")
             print(f"可用接口列表: 运行 'ip link show' 查看")
+            return False
     
     def initialize(self):
         """初始化 IDS 系统"""
@@ -161,7 +198,8 @@ class IDSManager:
         self.event_handler = EventHandler(self.rule_manager)
         
         # 附加探针
-        self.attach_probes()
+        if not self.attach_probes():
+            return False
         
         return True
     
