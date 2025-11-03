@@ -3,6 +3,7 @@
 #include <uapi/linux/ip.h>
 #include <uapi/linux/tcp.h>
 #include <uapi/linux/udp.h>
+#include <uapi/linux/icmp.h>
 #include <uapi/linux/in.h>
 #include <uapi/linux/pkt_cls.h>
 
@@ -126,6 +127,11 @@ static inline int match_rules(struct packet_event *evt) {
     __u32 key = 0;
     __u32 *rule_count = rule_cache.lookup(&key);
     
+    // 捕获所有 ICMP 流量（ping）
+    if (evt->protocol == IPPROTO_ICMP) {
+        return 1;
+    }
+    
     if (!rule_count)
         return 0;
     
@@ -142,6 +148,11 @@ static inline int match_rules(struct packet_event *evt) {
                 return 1;
             }
         }
+    }
+    
+    // 捕获所有 UDP 流量
+    if (evt->protocol == IPPROTO_UDP) {
+        return 1;
     }
     
     // 检查扫描行为
