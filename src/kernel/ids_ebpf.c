@@ -65,12 +65,16 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         // 提取 TCP payload
         __u32 payload_offset = l4_offset + (tcp.doff * 4);
         
-        // 确保 payload_len 非负
+        // 确保 payload_len 非负 - 使用显式的边界检查
         if (skb->len > payload_offset) {
             __u32 payload_len = skb->len - payload_offset;
             
+            // 限制 payload_len 的最大值
             if (payload_len > 256)
                 payload_len = 256;
+            
+            // 使用位操作确保值为正数（eBPF 验证器要求）
+            payload_len &= 0xFF;
             
             if (payload_len > 0) {
                 evt->payload_len = payload_len;
@@ -90,12 +94,16 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         // 提取 UDP payload
         __u32 payload_offset = l4_offset + sizeof(struct udphdr);
         
-        // 确保 payload_len 非负
+        // 确保 payload_len 非负 - 使用显式的边界检查
         if (skb->len > payload_offset) {
             __u32 payload_len = skb->len - payload_offset;
             
+            // 限制 payload_len 的最大值
             if (payload_len > 256)
                 payload_len = 256;
+            
+            // 使用位操作确保值为正数（eBPF 验证器要求）
+            payload_len &= 0xFF;
             
             if (payload_len > 0) {
                 evt->payload_len = payload_len;
