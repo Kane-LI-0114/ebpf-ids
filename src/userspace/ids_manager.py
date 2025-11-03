@@ -50,21 +50,128 @@ class RuleManager:
     def __init__(self, rules_dir):
         self.rules_dir = rules_dir
         self.rules = []
+        self.rules_by_sid = {}  # SID -> 规则映射
+        self.loaded = False
         
     def load_rules(self):
         """从规则目录加载规则"""
-        # TODO: 实现规则加载逻辑
-        pass
+        from rule_loader import RuleLoader, RuleParser
+        
+        print(f"正在从 {self.rules_dir} 加载规则...")
+        
+        loader = RuleLoader(self.rules_dir)
+        raw_rules = loader.load_all_rules()
+        
+        if not raw_rules:
+            print("  警告: 未找到规则文件")
+            return
+        
+        print(f"正在解析 {len(raw_rules)} 条规则...")
+        self.rules = RuleParser.compile_rules(raw_rules)
+        
+        # 建立 SID 索引
+        for rule in self.rules:
+            sid = rule['sid']
+            self.rules_by_sid[sid] = rule
+        
+        print(f"✓ 成功加载 {len(self.rules)} 条规则")
+        self.loaded = True
+        
+        # 打印规则统计
+        self._print_statistics()
     
-    def parse_rule(self, rule_data):
-        """解析单条规则"""
-        # TODO: 实现规则解析逻辑
-        pass
+    def _print_statistics(self):
+        """打印规则统计信息"""
+        if not self.rules:
+            return
+        
+        # 统计协议
+        protocol_count = {}
+        for rule in self.rules:
+            proto = rule['protocol']
+            proto_name = {6: 'TCP', 17: 'UDP', 1: 'ICMP', 0: 'ANY'}.get(proto, f'Proto-{proto}')
+            protocol_count[proto_name] = protocol_count.get(proto_name, 0) + 1
+        
+        print("\n规则统计:")
+        print(f"  总规则数: {len(self.rules)}")
+        print(f"  协议分布:")
+        for proto, count in sorted(protocol_count.items(), key=lambda x: x[1], reverse=True)[:5]:
+            print(f"    - {proto}: {count}")
     
-    def validate_rule(self, rule):
-        """验证规则有效性"""
-        # TODO: 实现规则验证逻辑
+    def get_rule_by_sid(self, sid):
+        """根据 SID 获取规则"""
+        return self.rules_by_sid.get(sid)
+    
+    def match_rule(self, packet_event):
+        """
+        匹配数据包与规则
+        返回: 匹配的规则列表
+        """
+        matched_rules = []
+        
+        for rule in self.rules[:100]:  # 先只检查前100条规则（性能优化）
+            if self._match_single_rule(rule, packet_event):
+                matched_rules.append(rule)
+        
+        return matched_rules
+    
+    def _match_single_rule(self, rule, event):
+        """
+        检查单条规则是否匹配
+        """
+        # 1. 匹配协议
+        if rule['protocol'] != 0 and rule['protocol'] != event.protocol:
+            return False
+        
+        # 2. 匹配源端口
+        if not self._match_port(rule['src_port'], event.src_port):
+            return False
+        
+        # 3. 匹配目标端口
+        if not self._match_port(rule['dst_port'], event.dst_port):
+            return False
+        
+        # 4. 匹配 content (如果有)
+        if rule['content'] and len(rule['content']) > 0:
+            if not self._match_content(rule['content'], event.payload, 
+                                       event.payload_len, rule['content_depth']):
+                return False
+        
         return True
+    
+    def _match_port(self, port_rule, packet_port):
+        """
+        匹配端口
+        port_rule: (type, value1, value2)
+        """
+        port_type, val1, val2 = port_rule
+        
+        if port_type == 0:  # any
+            return True
+        elif port_type == 1:  # single
+            return packet_port == val1
+        elif port_type == 2:  # range
+            return val1 <= packet_port <= val2
+        elif port_type == 3:  # list
+            return packet_port == val1 or packet_port == val2
+        
+        return False
+    
+    def _match_content(self, pattern, payload, payload_len, depth):
+        """
+        在 payload 中搜索 pattern
+        """
+        if payload_len < len(pattern):
+            return False
+        
+        search_len = min(depth, payload_len) if depth > 0 else payload_len
+        
+        # 转换 payload 为 bytes
+        payload_bytes = bytes(payload[:payload_len])
+        
+        # 在指定深度内搜索
+        search_area = payload_bytes[:search_len]
+        return pattern in search_area
     
     def get_rules(self):
         """获取所有规则"""
@@ -77,10 +184,14 @@ class EventHandler:
     def __init__(self, rule_manager):
         self.rule_manager = rule_manager
         self.event_count = 0
+        self.alert_count = 0
+        self.last_alerts = {}  # 用于去重：(src_ip, dst_ip, sid) -> timestamp
         
     def handle_event(self, cpu, data, size):
         """处理 eBPF 事件"""
         import ctypes as ct
+        from datetime import datetime
+        import time
         
         # 定义数据结构以匹配 C 结构体
         class PacketEvent(ct.Structure):
@@ -105,10 +216,46 @@ class EventHandler:
         protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
         protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
         
-        # 打印事件日志
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] [事件 #{self.event_count}] {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} "
-              f"| {protocol_name} | Payload: {event.payload_len} bytes")
+        # 匹配规则
+        matched_rules = self.rule_manager.match_rule(event)
+        
+        if matched_rules:
+            # 有规则匹配，生成告警
+            for rule in matched_rules:
+                # 去重检查（同一个源目标对，同一规则，10秒内只告警一次）
+                alert_key = (event.src_ip, event.dst_ip, rule['sid'])
+                current_time = time.time()
+                
+                if alert_key in self.last_alerts:
+                    if current_time - self.last_alerts[alert_key] < 10:
+                        continue  # 跳过重复告警
+                
+                self.last_alerts[alert_key] = current_time
+                self.alert_count += 1
+                
+                # 打印告警
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"\n{'='*80}")
+                print(f"[ALERT #{self.alert_count}] {timestamp}")
+                print(f"{'='*80}")
+                print(f"规则: [{rule['sid']}] {rule['msg']}")
+                print(f"分类: {rule['classtype']} | 优先级: {rule['priority']}")
+                print(f"协议: {protocol_name}")
+                print(f"源地址: {src_ip}:{event.src_port}")
+                print(f"目标地址: {dst_ip}:{event.dst_port}")
+                
+                # 显示匹配的内容
+                if rule['content'] and event.payload_len > 0:
+                    print(f"匹配内容: {self._format_payload(rule['content'])}")
+                    print(f"数据包载荷: {self._format_payload(bytes(event.payload[:min(32, event.payload_len)]))}")
+                
+                print(f"{'='*80}\n")
+        else:
+            # 普通流量日志（降低输出频率）
+            if self.event_count % 100 == 0:  # 每100个包输出一次
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"[{timestamp}] [事件 #{self.event_count}] {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} "
+                      f"| {protocol_name} | Payload: {event.payload_len} bytes")
     
     def format_ip(self, ip_int):
         """格式化 IP 地址"""
@@ -119,15 +266,18 @@ class EventHandler:
             (ip_int >> 24) & 0xFF
         ]))
     
-    def process_packet(self, event):
-        """处理数据包事件"""
-        # TODO: 实现数据包处理逻辑
-        pass
+    def _format_payload(self, data):
+        """格式化 payload 为十六进制和 ASCII"""
+        hex_str = ' '.join(f'{b:02x}' for b in data[:32])
+        ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in data[:32])
+        return f"{hex_str} | {ascii_str}"
     
-    def log_alert(self, alert_info):
-        """记录告警信息"""
-        # TODO: 实现告警日志记录
-        pass
+    def get_statistics(self):
+        """获取统计信息"""
+        return {
+            'total_events': self.event_count,
+            'total_alerts': self.alert_count,
+        }
 
 
 class IDSManager:
@@ -228,9 +378,15 @@ class IDSManager:
     
     def stop(self):
         """停止 IDS"""
-        print("正在停止 IDS...")
-        # TODO: 实现清理逻辑
-        pass
+        print("\n正在停止 IDS...")
+        
+        if self.event_handler:
+            stats = self.event_handler.get_statistics()
+            print(f"\n最终统计:")
+            print(f"  总事件数: {stats['total_events']}")
+            print(f"  告警次数: {stats['total_alerts']}")
+            
+        print("IDS 已停止")
 
 
 def main():
