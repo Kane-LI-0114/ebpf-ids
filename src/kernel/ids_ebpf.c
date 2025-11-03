@@ -31,65 +31,70 @@ BPF_HASH(connection_state, __u64, __u32);
 
 // 包解析函数
 static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) {
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
+    // 从 skb 中加载数据
+    __u32 proto;
+    __u32 nhoff = ETH_HLEN;
     
-    // 解析以太网头
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
-        return -1;
+    // 读取以太网协议类型
+    bpf_skb_load_bytes(skb, 12, &proto, 2);
+    proto = bpf_ntohs(proto);
     
     // 检查是否为 IP 协议
-    if (eth->h_proto != bpf_htons(ETH_P_IP))
+    if (proto != ETH_P_IP)
         return -1;
     
-    // 解析 IP 头
-    struct iphdr *ip = (void *)(eth + 1);
-    if ((void *)(ip + 1) > data_end)
-        return -1;
+    // 读取 IP 头部信息
+    struct iphdr ip;
+    bpf_skb_load_bytes(skb, nhoff, &ip, sizeof(ip));
     
     // 填充基本 IP 信息
-    evt->src_ip = ip->saddr;
-    evt->dst_ip = ip->daddr;
-    evt->protocol = ip->protocol;
+    evt->src_ip = ip.saddr;
+    evt->dst_ip = ip.daddr;
+    evt->protocol = ip.protocol;
     
-    void *l4_header = (void *)ip + (ip->ihl * 4);
+    __u32 l4_offset = nhoff + (ip.ihl * 4);
     
     // 根据协议类型解析传输层
-    if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = l4_header;
-        if ((void *)(tcp + 1) > data_end)
-            return -1;
+    if (ip.protocol == IPPROTO_TCP) {
+        struct tcphdr tcp;
+        bpf_skb_load_bytes(skb, l4_offset, &tcp, sizeof(tcp));
         
-        evt->src_port = bpf_ntohs(tcp->source);
-        evt->dst_port = bpf_ntohs(tcp->dest);
+        evt->src_port = bpf_ntohs(tcp.source);
+        evt->dst_port = bpf_ntohs(tcp.dest);
         
         // 提取 TCP payload
-        void *payload = (void *)tcp + (tcp->doff * 4);
-        if (payload < data_end) {
-            __u32 payload_len = data_end - payload;
-            if (payload_len > 256)
-                payload_len = 256;
+        __u32 payload_offset = l4_offset + (tcp.doff * 4);
+        __u32 payload_len = skb->len - payload_offset;
+        
+        if (payload_len > 256)
+            payload_len = 256;
+        
+        if (payload_len > 0) {
             evt->payload_len = payload_len;
-            bpf_probe_read(evt->payload, payload_len, payload);
+            bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
+        } else {
+            evt->payload_len = 0;
         }
         
-    } else if (ip->protocol == IPPROTO_UDP) {
-        struct udphdr *udp = l4_header;
-        if ((void *)(udp + 1) > data_end)
-            return -1;
+    } else if (ip.protocol == IPPROTO_UDP) {
+        struct udphdr udp;
+        bpf_skb_load_bytes(skb, l4_offset, &udp, sizeof(udp));
         
-        evt->src_port = bpf_ntohs(udp->source);
-        evt->dst_port = bpf_ntohs(udp->dest);
+        evt->src_port = bpf_ntohs(udp.source);
+        evt->dst_port = bpf_ntohs(udp.dest);
         
         // 提取 UDP payload
-        void *payload = (void *)(udp + 1);
-        if (payload < data_end) {
-            __u32 payload_len = data_end - payload;
-            if (payload_len > 256)
-                payload_len = 256;
+        __u32 payload_offset = l4_offset + sizeof(struct udphdr);
+        __u32 payload_len = skb->len - payload_offset;
+        
+        if (payload_len > 256)
+            payload_len = 256;
+        
+        if (payload_len > 0) {
             evt->payload_len = payload_len;
-            bpf_probe_read(evt->payload, payload_len, payload);
+            bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
+        } else {
+            evt->payload_len = 0;
         }
     } else {
         evt->src_port = 0;
