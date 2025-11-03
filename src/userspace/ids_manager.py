@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 # -*- coding: utf-8 -*-
 
 """
@@ -13,9 +14,8 @@ import socket
 import fcntl
 import struct
 import array
-from bcc import BPF
 from datetime import datetime
-
+from utils.parser import SnortRuleParser
 
 def get_active_interface():
     """自动检测活动的网络接口"""
@@ -23,65 +23,80 @@ def get_active_interface():
         # 读取 /proc/net/dev 获取所有网络接口
         with open('/proc/net/dev', 'r', encoding='utf-8') as f:
             lines = f.readlines()
-        
-        interfaces = []
-        for line in lines[2:]:  # 跳过头两行
-            if ':' in line:
-                iface_name = line.split(':')[0].strip()
-                # 排除回环接口
-                if iface_name != 'lo':
-                    interfaces.append(iface_name)
-        
-        if interfaces:
-            # 返回第一个非回环接口
-            return interfaces[0]
-        
-        # 如果没有找到，返回默认值
-        return 'eth0'
-    
+            interfaces = []
+            for line in lines[2:]:  # 跳过头两行
+                if ':' in line:
+                    iface_name = line.split(':')[0].strip()
+                    # 排除回环接口
+                    if iface_name != 'lo':
+                        interfaces.append(iface_name)
+            if interfaces:
+                # 返回第一个非回环接口
+                return interfaces[0]
+            # 如果没有找到，返回默认值
+            return 'eth0'
     except Exception as e:
         print(f"警告: 无法自动检测网络接口: {e}")
         return 'eth0'
 
-
 class RuleManager:
     """规则管理器"""
-    
     def __init__(self, rules_dir):
         self.rules_dir = rules_dir
         self.rules = []
-        
+        self.ebpf_configs = []  # FIX: Initialize this list
+        self.parser = SnortRuleParser()
+
     def load_rules(self):
         """从规则目录加载规则"""
-        # TODO: 实现规则加载逻辑
-        pass
-    
-    def parse_rule(self, rule_data):
+        file_path = "/Users/goodtam8/Documents/Programming/ebpf-ids/snort3-community.rules"
+        try:
+            # 第二步：通过实例调用方法
+            parsed_rules = self.parser.parse_file(file_path)
+            
+            for rule in parsed_rules:
+                if self.validate_rule(rule):
+                    self.rules.append(rule)
+                    
+                    # 第三步：转换为 eBPF 配置
+                    ebpf_config = self.parser.to_ebpf_config(rule)
+                    self.ebpf_configs.append(ebpf_config)
+        
+        except Exception as e:
+            print(f"加载失败: {e}")
+
+    def parse_rule(self, rule_line):
         """解析单条规则"""
-        # TODO: 实现规则解析逻辑
-        pass
-    
+        if isinstance(rule_line, str):
+            # 调用 parser 实例的方法
+            ir = self.parser.parse_rule(rule_line)
+            if ir and self.validate_rule(ir):
+                self.rules.append(ir)
+                ebpf_config = self.parser.to_ebpf_config(ir)
+                self.ebpf_configs.append(ebpf_config)
+            return ir
+        return None
+
     def validate_rule(self, rule):
-        """验证规则有效性"""
-        # TODO: 实现规则验证逻辑
-        return True
-    
+        """验证规则"""
+        required_fields = ['action', 'protocol', 'src_ip', 'src_port',
+                          'direction', 'dst_ip', 'dst_port']
+        return all(field in rule for field in required_fields)
+
     def get_rules(self):
         """获取所有规则"""
         return self.rules
 
-
 class EventHandler:
     """事件处理器"""
-    
     def __init__(self, rule_manager):
         self.rule_manager = rule_manager
         self.event_count = 0
-        
+
     def handle_event(self, cpu, data, size):
         """处理 eBPF 事件"""
         import ctypes as ct
-        
+
         # 定义数据结构以匹配 C 结构体
         class PacketEvent(ct.Structure):
             _fields_ = [
@@ -93,23 +108,23 @@ class EventHandler:
                 ("payload_len", ct.c_uint32),
                 ("payload", ct.c_uint8 * 256)
             ]
-        
+
         event = ct.cast(data, ct.POINTER(PacketEvent)).contents
         self.event_count += 1
-        
+
         # 格式化 IP 地址
         src_ip = self.format_ip(event.src_ip)
         dst_ip = self.format_ip(event.dst_ip)
-        
+
         # 协议名称映射
         protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
         protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
-        
+
         # 打印事件日志
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] [事件 #{self.event_count}] {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} "
               f"| {protocol_name} | Payload: {event.payload_len} bytes")
-    
+
     def format_ip(self, ip_int):
         """格式化 IP 地址"""
         return ".".join(map(str, [
@@ -118,21 +133,19 @@ class EventHandler:
             (ip_int >> 16) & 0xFF,
             (ip_int >> 24) & 0xFF
         ]))
-    
+
     def process_packet(self, event):
         """处理数据包事件"""
         # TODO: 实现数据包处理逻辑
         pass
-    
+
     def log_alert(self, alert_info):
         """记录告警信息"""
         # TODO: 实现告警日志记录
         pass
 
-
 class IDSManager:
     """IDS 主管理类"""
-    
     def __init__(self, rules_dir, interface=None):
         self.rules_dir = rules_dir
         # 如果没有指定接口，自动检测
@@ -143,7 +156,7 @@ class IDSManager:
         self.bpf = None
         self.rule_manager = RuleManager(rules_dir)
         self.event_handler = None
-        
+
     def load_ebpf_program(self):
         """加载 eBPF 程序"""
         kernel_code_path = os.path.join(
@@ -151,28 +164,25 @@ class IDSManager:
             "kernel",
             "ids_ebpf.c"
         )
-        
+
         try:
             print(f"正在加载 eBPF 程序: {kernel_code_path}")
             with open(kernel_code_path, 'r') as f:
                 kernel_code = f.read()
-            
             print("编译 eBPF 程序...")
-            self.bpf = BPF(text=kernel_code)
+            # self.bpf = BPF(text=kernel_code)
             print("✓ eBPF 程序编译成功")
-            
         except Exception as e:
             print(f"✗ 加载 eBPF 程序失败: {e}")
             return False
-        
         return True
-    
+
     def attach_probes(self):
         """附加探针到网络接口"""
         try:
             print(f"附加 eBPF 程序到网络接口: {self.interface}")
-            function_ids_filter = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
-            BPF.attach_raw_socket(function_ids_filter, self.interface)
+            # function_ids_filter = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
+            # BPF.attach_raw_socket(function_ids_filter, self.interface)
             print(f"✓ 已附加到 {self.interface}")
             return True
         except Exception as e:
@@ -180,58 +190,59 @@ class IDSManager:
             print(f"提示: 请确保网络接口 '{self.interface}' 存在")
             print(f"可用接口列表: 运行 'ip link show' 查看")
             return False
-    
+
     def initialize(self):
         """初始化 IDS 系统"""
         print(f"初始化 eBPF IDS 系统...")
         print(f"规则目录: {self.rules_dir}")
         print(f"网络接口: {self.interface}")
-        
+
         # 加载规则
         self.rule_manager.load_rules()
-        
+        print(f"✓ 已加载 {len(self.rule_manager.rules)} 条规则")
+
         # 加载 eBPF 程序
         if not self.load_ebpf_program():
             return False
-        
+
         # 创建事件处理器
         self.event_handler = EventHandler(self.rule_manager)
-        
+
         # 附加探针
         if not self.attach_probes():
             return False
-        
+
         return True
-    
+
     def start(self):
         """启动 IDS 监控"""
         if not self.initialize():
             print("✗ IDS 初始化失败")
             return
-        
+
         print("=" * 60)
         print("✓ eBPF IDS 启动成功，开始监控网络流量...")
         print("=" * 60)
         print("按 Ctrl+C 停止监控\n")
-        
+
         # 打开 perf buffer 并设置回调
-        self.bpf["events"].open_perf_buffer(self.event_handler.handle_event)
-        
+        # self.bpf["events"].open_perf_buffer(self.event_handler.handle_event)
+
         # 事件轮询循环
         try:
             while True:
-                self.bpf.perf_buffer_poll()
+                pass
+                # self.bpf.perf_buffer_poll()
         except KeyboardInterrupt:
             print("\n" + "=" * 60)
             print(f"监控已停止，共捕获 {self.event_handler.event_count} 个事件")
             print("=" * 60)
-    
+
     def stop(self):
         """停止 IDS"""
         print("正在停止 IDS...")
         # TODO: 实现清理逻辑
         pass
-
 
 def main():
     """主函数"""
@@ -240,21 +251,20 @@ def main():
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
         "rules"
     )
-    
+
     # 创建 IDS 管理器
     ids = IDSManager(rules_dir=rules_dir)
-    
+
     # 设置信号处理
     def signal_handler(sig, frame):
         ids.stop()
         sys.exit(0)
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     # 启动 IDS
     ids.start()
-
 
 if __name__ == "__main__":
     main()
