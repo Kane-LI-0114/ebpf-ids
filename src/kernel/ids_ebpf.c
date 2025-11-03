@@ -1,10 +1,10 @@
 // eBPF IDS 内核程序
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
-#include <linux/tcp.h>
-#include <linux/udp.h>
-#include <linux/in.h>
+#include <uapi/linux/if_ether.h>
+#include <uapi/linux/ip.h>
+#include <uapi/linux/tcp.h>
+#include <uapi/linux/udp.h>
+#include <uapi/linux/in.h>
+#include <uapi/linux/pkt_cls.h>
 
 // 定义事件数据结构
 struct packet_event {
@@ -40,7 +40,7 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         return -1;
     
     // 检查是否为 IP 协议
-    if (eth->h_proto != __constant_htons(ETH_P_IP))
+    if (eth->h_proto != bpf_htons(ETH_P_IP))
         return -1;
     
     // 解析 IP 头
@@ -61,8 +61,8 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         if ((void *)(tcp + 1) > data_end)
             return -1;
         
-        evt->src_port = __constant_ntohs(tcp->source);
-        evt->dst_port = __constant_ntohs(tcp->dest);
+        evt->src_port = bpf_ntohs(tcp->source);
+        evt->dst_port = bpf_ntohs(tcp->dest);
         
         // 提取 TCP payload
         void *payload = (void *)tcp + (tcp->doff * 4);
@@ -71,7 +71,7 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
             if (payload_len > 256)
                 payload_len = 256;
             evt->payload_len = payload_len;
-            bpf_probe_read_kernel(evt->payload, payload_len, payload);
+            bpf_probe_read(evt->payload, payload_len, payload);
         }
         
     } else if (ip->protocol == IPPROTO_UDP) {
@@ -79,8 +79,8 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         if ((void *)(udp + 1) > data_end)
             return -1;
         
-        evt->src_port = __constant_ntohs(udp->source);
-        evt->dst_port = __constant_ntohs(udp->dest);
+        evt->src_port = bpf_ntohs(udp->source);
+        evt->dst_port = bpf_ntohs(udp->dest);
         
         // 提取 UDP payload
         void *payload = (void *)(udp + 1);
@@ -89,7 +89,7 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
             if (payload_len > 256)
                 payload_len = 256;
             evt->payload_len = payload_len;
-            bpf_probe_read_kernel(evt->payload, payload_len, payload);
+            bpf_probe_read(evt->payload, payload_len, payload);
         }
     } else {
         evt->src_port = 0;
