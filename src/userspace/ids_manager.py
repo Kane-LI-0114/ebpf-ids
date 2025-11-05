@@ -188,12 +188,11 @@ class EventHandler:
         self.last_alerts = {}  # 用于去重：(src_ip, dst_ip, sid) -> timestamp
 
     def handle_event(self, cpu, data, size):
-        """处理eBPF事件 - 现在事件来自编译后的规则"""
+        """处理eBPF事件 - 添加详细调试"""
         import ctypes as ct
         from datetime import datetime
         import time
 
-        # 新的数据结构 - 移到方法外部避免重复定义
         class PacketEvent(ct.Structure):
             _fields_ = [
                 ("src_ip", ct.c_uint32),
@@ -201,17 +200,38 @@ class EventHandler:
                 ("src_port", ct.c_uint16),
                 ("dst_port", ct.c_uint16),
                 ("protocol", ct.c_uint8),
-                ("sid", ct.c_uint32),  # 匹配的规则SID
+                ("sid", ct.c_uint32),
             ]
 
         try:
             if size < ct.sizeof(PacketEvent):
+                print(f"[调试] 事件大小不足: {size} < {ct.sizeof(PacketEvent)}")
                 return
 
             event = ct.cast(data, ct.POINTER(PacketEvent)).contents
             self.event_count += 1
 
-            # 根据SID查找规则信息
+            # 详细调试信息 - 每10个事件输出一次
+            if self.event_count % 10 == 0:
+                src_ip = self.format_ip(event.src_ip)
+                dst_ip = self.format_ip(event.dst_ip)
+                protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
+                protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
+
+                print(f"[调试] 事件 #{self.event_count}")
+                print(f"      SID: {event.sid}")
+                print(f"      协议: {protocol_name}")
+                print(f"      源: {src_ip}:{event.src_port}")
+                print(f"      目标: {dst_ip}:{event.dst_port}")
+
+                # 检查规则查找
+                matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
+                if matched_rule:
+                    print(f"      找到规则: {matched_rule['msg'][:30]}...")
+                else:
+                    print(f"      ❌ 未找到规则 SID={event.sid}")
+
+            # 正常的事件处理逻辑
             matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
 
             if matched_rule and event.sid != 0:
@@ -221,7 +241,7 @@ class EventHandler:
 
                 if alert_key in self.last_alerts:
                     if current_time - self.last_alerts[alert_key] < 10:
-                        return  # 跳过重复告警
+                        return
 
                 self.last_alerts[alert_key] = current_time
                 self.alert_count += 1
@@ -230,7 +250,6 @@ class EventHandler:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 src_ip = self.format_ip(event.src_ip)
                 dst_ip = self.format_ip(event.dst_ip)
-
                 protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
                 protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
 
@@ -244,7 +263,7 @@ class EventHandler:
                 print(f"目标地址: {dst_ip}:{event.dst_port}")
                 print(f"{'=' * 80}\n")
             else:
-                # 普通流量日志（降低输出频率）
+                # 普通流量日志
                 if self.event_count % 10 == 0:
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     src_ip = self.format_ip(event.src_ip)
@@ -253,13 +272,10 @@ class EventHandler:
                     protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
 
                     print(
-                        f"[{timestamp}] [事件 #{self.event_count}] {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} "
-                        f"| {protocol_name}")
+                        f"[{timestamp}] [事件 #{self.event_count}] {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} | {protocol_name}")
 
         except Exception as e:
-            # 忽略处理错误，继续运行
-            # if self.event_count % 500 == 0:  # 每500个错误输出一次
-                print(f"[调试] 事件处理错误: {e}")
+            print(f"[错误] 事件处理异常: {e}")
 
     def _generate_alert(self, event, rule):
         """生成规则匹配告警"""
