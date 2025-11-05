@@ -289,7 +289,6 @@ class RuleCompiler:
     """规则编译器 - 使用与硬编码版本相同的结构"""
 
     def __init__(self):
-        # 直接使用你原有的ids_ebpf.c中的基础结构
         self.ebpf_header = """
 #include <uapi/linux/if_ether.h>
 #include <uapi/linux/ip.h>
@@ -315,9 +314,55 @@ BPF_PERF_OUTPUT(events);
 BPF_HASH(rule_cache, __u32, __u32);
 BPF_HASH(connection_state, __u64, __u32);
 
-/* 包解析函数 - 简化的版本 */
+/* 完整的包解析函数 - 修复版本 */
 static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) {
-    // 这里可以简化，因为我们主要测试规则匹配
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+
+    // 检查以太网头
+    struct ethhdr *eth = data;
+    if ((void *)eth + sizeof(*eth) > data_end)
+        return -1;
+
+    // 只处理IPv4 (0x0800 in host byte order is 8)
+    if (eth->h_proto != 8)
+        return -1;
+
+    // 检查IP头
+    struct iphdr *iph = (void *)eth + sizeof(*eth);
+    if ((void *)iph + sizeof(*iph) > data_end)
+        return -1;
+
+    // 填充基本信息
+    evt->src_ip = iph->saddr;
+    evt->dst_ip = iph->daddr;
+    evt->protocol = iph->protocol;
+
+    // 计算传输层头部位置
+    void *trans_header = (void *)iph + (iph->ihl * 4);
+
+    // 解析TCP
+    if (iph->protocol == 6) {  // IPPROTO_TCP
+        struct tcphdr *tcp = trans_header;
+        if ((void *)tcp + sizeof(*tcp) <= data_end) {
+            evt->src_port = bpf_ntohs(tcp->source);
+            evt->dst_port = bpf_ntohs(tcp->dest);
+        }
+    }
+    // 解析UDP
+    else if (iph->protocol == 17) {  // IPPROTO_UDP
+        struct udphdr *udp = trans_header;
+        if ((void *)udp + sizeof(*udp) <= data_end) {
+            evt->src_port = bpf_ntohs(udp->source);
+            evt->dst_port = bpf_ntohs(udp->dest);
+        }
+    }
+    // ICMP没有端口
+    else if (iph->protocol == 1) {  // IPPROTO_ICMP
+        evt->src_port = 0;
+        evt->dst_port = 0;
+    }
+
     return 0;
 }
 """
