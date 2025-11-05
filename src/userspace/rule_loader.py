@@ -417,24 +417,54 @@ int ids_filter(struct __sk_buff *skb) {
             return f"    return {sid};"
 
     def compile_rules(self, rules):
-        """编译所有规则为eBPF代码"""
+        """编译所有规则为eBPF代码 - 修复逻辑顺序"""
         print("正在编译规则为eBPF代码...")
 
-        # 生成规则条件
-        rule_conditions = []
+        # 将规则分类：具体规则 vs 通用规则
+        specific_rules = []  # 有具体端口条件的规则
+        generic_rules = []  # 只有协议条件的通用规则
 
-        # 选择前5条规则进行测试（最小化测试）
-        test_rules = rules[:100]
-
-        print(f"选择 {len(test_rules)} 条规则进行测试编译...")
+        test_rules = rules[:100]  # 你选择的100条规则
 
         for rule in test_rules:
+            port_type, val1, val2 = rule.get('dst_port', (0, 0, 0))
+            protocol = rule.get('protocol', 0)
+
+            # 有具体端口条件的规则
+            if port_type != 0 and protocol != 0:
+                specific_rules.append(rule)
+            # 只有协议条件的通用规则
+            elif protocol != 0:
+                generic_rules.append(rule)
+
+        print(f"选择 {len(specific_rules)} 条具体规则 + {len(generic_rules)} 条通用规则")
+
+        # 生成规则条件：具体规则在前，通用规则在后
+        rule_conditions = []
+
+        # 1. 先处理具体规则
+        for rule in specific_rules:
             condition = self._generate_rule_condition(rule)
             if condition:
                 rule_conditions.append(condition)
 
-        # 组合完整eBPF代码
-        complete_ebpf = self.ebpf_base % "\n".join(rule_conditions)
+        # 2. 再处理通用规则
+        for rule in generic_rules:
+            condition = self._generate_rule_condition(rule)
+            if condition:
+                rule_conditions.append(condition)
 
-        print(f"✓ 成功编译 {len(rule_conditions)} 条规则到eBPF")
+        # 使用 else-if 链
+        else_if_chain = []
+        for i, condition in enumerate(rule_conditions):
+            if i == 0:
+                else_if_chain.append(condition)
+            else:
+                # 将 "if" 替换为 "else if"
+                else_if_chain.append(condition.replace("    if (", "    else if (", 1))
+
+        complete_ebpf = (self.ebpf_header +
+                         self.ebpf_footer % "\n".join(else_if_chain))
+
+        print(f"✓ 成功编译 {len(rule_conditions)} 条规则到eBPF（使用else-if链）")
         return complete_ebpf
