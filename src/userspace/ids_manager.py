@@ -245,7 +245,7 @@ class EventHandler:
                 print(f"{'=' * 80}\n")
             else:
                 # 普通流量日志（降低输出频率）
-                if self.event_count % 1000 == 0:
+                if self.event_count % 10 == 0:
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     src_ip = self.format_ip(event.src_ip)
                     dst_ip = self.format_ip(event.dst_ip)
