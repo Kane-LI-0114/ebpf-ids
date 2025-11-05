@@ -286,7 +286,7 @@ class RuleParser:
 
 
 class RuleCompiler:
-    """规则编译器 - 最小化修改方案"""
+    """规则编译器 - 使用与硬编码版本相同的结构"""
 
     def __init__(self):
         # 直接使用你原有的完整eBPF代码作为基础
@@ -463,8 +463,7 @@ int ids_filter(struct __sk_buff *skb) {
                 # 将 "if" 替换为 "else if"
                 else_if_chain.append(condition.replace("    if (", "    else if (", 1))
 
-        complete_ebpf = (self.ebpf_header +
-                         self.ebpf_footer % "\n".join(else_if_chain))
+        complete_ebpf = (self.ebpf_base % "\n".join(else_if_chain))
 
         print(f"✓ 成功编译 {len(rule_conditions)} 条规则到eBPF（使用else-if链）")
         return complete_ebpf
