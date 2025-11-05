@@ -193,7 +193,7 @@ class EventHandler:
         from datetime import datetime
         import time
 
-        # 新的数据结构
+        # 新的数据结构 - 移到方法外部避免重复定义
         class PacketEvent(ct.Structure):
             _fields_ = [
                 ("src_ip", ct.c_uint32),
@@ -205,6 +205,9 @@ class EventHandler:
             ]
 
         try:
+            if size < ct.sizeof(PacketEvent):
+                return
+
             event = ct.cast(data, ct.POINTER(PacketEvent)).contents
             self.event_count += 1
 
@@ -255,7 +258,8 @@ class EventHandler:
 
         except Exception as e:
             # 忽略处理错误，继续运行
-            pass
+            if self.event_count % 500 == 0:  # 每500个错误输出一次
+                print(f"[调试] 事件处理错误: {e}")
 
     def _generate_alert(self, event, rule):
         """生成规则匹配告警"""
@@ -327,6 +331,7 @@ class IDSManager:
         self.bpf = None
         self.rule_manager = RuleManager(rules_dir)
         self.event_handler = None
+        self.running = False  # 添加运行标志
 
     def load_ebpf_program(self):
         """加载eBPF程序 - 支持动态编译和回退"""
@@ -426,40 +431,53 @@ class IDSManager:
             return False
         
         return True
-    
+
     def start(self):
         """启动 IDS 监控"""
         if not self.initialize():
             print("✗ IDS 初始化失败")
             return
-        
+
         print("=" * 60)
         print("✓ eBPF IDS 启动成功，开始监控网络流量...")
         print("=" * 60)
         print("按 Ctrl+C 停止监控\n")
-        
+
         # 打开 perf buffer 并设置回调
         self.bpf["events"].open_perf_buffer(self.event_handler.handle_event)
-        
+
+        # 设置退出标志
+        self.running = True
+
         # 事件轮询循环
         try:
-            while True:
-                self.bpf.perf_buffer_poll()
-        except KeyboardInterrupt:
-            print("\n" + "=" * 60)
-            print(f"监控已停止，共捕获 {self.event_handler.event_count} 个事件")
-            print("=" * 60)
-    
+            while self.running:
+                try:
+                    self.bpf.perf_buffer_poll(timeout=1000)  # 1秒超时
+                except KeyboardInterrupt:
+                    print("\n" + "=" * 60)
+                    print("接收到中断信号，正在停止...")
+                    break
+                except Exception as e:
+                    # 忽略其他错误，继续运行
+                    continue
+
+        except Exception as e:
+            print(f"监控循环错误: {e}")
+
+        self.stop()
+
     def stop(self):
         """停止 IDS"""
         print("\n正在停止 IDS...")
-        
+        self.running = False
+
         if self.event_handler:
             stats = self.event_handler.get_statistics()
             print(f"\n最终统计:")
             print(f"  总事件数: {stats['total_events']}")
             print(f"  告警次数: {stats['total_alerts']}")
-            
+
         print("IDS 已停止")
 
 
