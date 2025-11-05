@@ -245,7 +245,7 @@ class EventHandler:
                 print(f"{'=' * 80}\n")
             else:
                 # 普通流量日志（降低输出频率）
-                if self.event_count % 100 == 0:
+                # if self.event_count % 100 == 0:
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     src_ip = self.format_ip(event.src_ip)
                     dst_ip = self.format_ip(event.dst_ip)
@@ -258,7 +258,7 @@ class EventHandler:
 
         except Exception as e:
             # 忽略处理错误，继续运行
-            if self.event_count % 500 == 0:  # 每500个错误输出一次
+            # if self.event_count % 500 == 0:  # 每500个错误输出一次
                 print(f"[调试] 事件处理错误: {e}")
 
     def _generate_alert(self, event, rule):

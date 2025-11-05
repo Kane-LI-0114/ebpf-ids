@@ -424,7 +424,7 @@ int ids_filter(struct __sk_buff *skb) {
         rule_conditions = []
 
         # 选择前5条规则进行测试（最小化测试）
-        test_rules = rules[:5]
+        test_rules = rules[:100]
 
         print(f"选择 {len(test_rules)} 条规则进行测试编译...")
 
