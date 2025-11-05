@@ -351,8 +351,8 @@ int ids_filter(struct __sk_buff *skb) {
 }
 """
 
-    def _generate_rule_function(self, rule, index):
-        """为单条规则生成eBPF检测代码"""
+    def _generate_rule_condition(self, rule):
+        """为单条规则生成eBPF检测条件"""
         sid = rule.get('sid', 0)
         protocol = rule.get('protocol', 0)
 
@@ -360,25 +360,23 @@ int ids_filter(struct __sk_buff *skb) {
 
         # 协议检查
         if protocol != 0:
-            conditions.append(f"if (evt->protocol != {protocol})")
+            conditions.append(f"evt->protocol == {protocol}")
 
         # 端口检查
         port_type, val1, val2 = rule.get('dst_port', (0, 0, 0))
         if protocol == 6 and port_type == 1:  # TCP单个端口
-            conditions.append(f"if (evt->dst_port != {val1})")
+            conditions.append(f"evt->dst_port == {val1}")
         elif protocol == 6 and port_type == 2:  # TCP端口范围
-            conditions.append(f"if (evt->dst_port < {val1} || evt->dst_port > {val2})")
+            conditions.append(f"(evt->dst_port >= {val1} && evt->dst_port <= {val2})")
+        elif protocol == 17 and port_type == 1:  # UDP单个端口
+            conditions.append(f"evt->dst_port == {val1}")
 
-        # 生成简单的if条件
+        # 生成完整的if条件
         if conditions:
             condition_str = " && ".join(conditions)
-            return f"    if ({condition_str}) {{ return {sid}; }}"
+            return f"    if ({condition_str}) return {sid};"
         else:
             return f"    return {sid};"
-
-    def _generate_rule_call(self, index):
-        """这个方法不需要了"""
-        return ""
 
     def compile_rules(self, rules):
         """编译所有规则为eBPF代码"""
@@ -392,8 +390,8 @@ int ids_filter(struct __sk_buff *skb) {
 
         print(f"选择 {len(test_rules)} 条规则进行测试编译...")
 
-        for i, rule in enumerate(test_rules):
-            condition = self._generate_rule_function(rule, i)
+        for rule in test_rules:
+            condition = self._generate_rule_condition(rule)
             if condition:
                 rule_conditions.append(condition)
 
