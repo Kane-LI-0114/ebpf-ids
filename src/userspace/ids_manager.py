@@ -200,7 +200,9 @@ class EventHandler:
                 ("src_port", ct.c_uint16),
                 ("dst_port", ct.c_uint16),
                 ("protocol", ct.c_uint8),
-                ("sid", ct.c_uint32),
+                ("sid", ct.c_uint32),  # 确保这个字段存在且位置正确
+                ("payload_len", ct.c_uint32),
+                ("payload", ct.c_ubyte * 256),
             ]
 
         try:

@@ -291,103 +291,107 @@ class RuleCompiler:
     def __init__(self):
         # 直接使用你原有的完整eBPF代码作为基础
         self.ebpf_base = """
-#include <uapi/linux/if_ether.h>
-#include <uapi/linux/ip.h>
-#include <uapi/linux/tcp.h>
-#include <uapi/linux/udp.h>
-#include <uapi/linux/icmp.h>
-#include <uapi/linux/in.h>
-#include <uapi/linux/pkt_cls.h>
+        #include <uapi/linux/if_ether.h>
+        #include <uapi/linux/ip.h>
+        #include <uapi/linux/tcp.h>
+        #include <uapi/linux/udp.h>
+        #include <uapi/linux/icmp.h>
+        #include <uapi/linux/in.h>
+        #include <uapi/linux/pkt_cls.h>
 
-// 定义事件数据结构
-struct packet_event {
-    __u32 src_ip;
-    __u32 dst_ip;
-    __u16 src_port;
-    __u16 dst_port;
-    __u8 protocol;
-    __u32 payload_len;
-    __u8 payload[256];
-};
+        // 定义事件数据结构 - 添加 sid 字段
+        struct packet_event {
+            __u32 src_ip;
+            __u32 dst_ip;
+            __u16 src_port;
+            __u16 dst_port;
+            __u8 protocol;
+            __u32 sid;  // 添加这个字段！
+            __u32 payload_len;
+            __u8 payload[256];
+        };
 
-// eBPF Maps 定义
-BPF_PERF_OUTPUT(events);
-BPF_HASH(rule_cache, __u32, __u32);
-BPF_HASH(connection_state, __u64, __u32);
+        // eBPF Maps 定义
+        BPF_PERF_OUTPUT(events);
+        BPF_HASH(rule_cache, __u32, __u32);
+        BPF_HASH(connection_state, __u64, __u32);
 
-// 包解析函数 - 使用你原有的工作版本
-static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) {
-    __u32 proto;
-    __u32 nhoff = 14;  // ETH_HLEN
+        // 包解析函数 - 使用你原有的工作版本
+        static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) {
+            __u32 proto;
+            __u32 nhoff = 14;  // ETH_HLEN
 
-    // 读取以太网协议类型
-    bpf_skb_load_bytes(skb, 12, &proto, 2);
-    proto = bpf_ntohs(proto);
+            // 读取以太网协议类型
+            bpf_skb_load_bytes(skb, 12, &proto, 2);
+            proto = bpf_ntohs(proto);
 
-    // 检查是否为 IP 协议
-    if (proto != 0x0800)  // ETH_P_IP
-        return -1;
+            // 检查是否为 IP 协议
+            if (proto != 0x0800)  // ETH_P_IP
+                return -1;
 
-    // 读取 IP 头部信息
-    struct iphdr ip;
-    bpf_skb_load_bytes(skb, nhoff, &ip, sizeof(ip));
+            // 读取 IP 头部信息
+            struct iphdr ip;
+            bpf_skb_load_bytes(skb, nhoff, &ip, sizeof(ip));
 
-    // 填充基本 IP 信息
-    evt->src_ip = ip.saddr;
-    evt->dst_ip = ip.daddr;
-    evt->protocol = ip.protocol;
+            // 填充基本 IP 信息
+            evt->src_ip = ip.saddr;
+            evt->dst_ip = ip.daddr;
+            evt->protocol = ip.protocol;
+            evt->sid = 0;  // 初始化为0
 
-    __u32 l4_offset = nhoff + (ip.ihl * 4);
+            __u32 l4_offset = nhoff + (ip.ihl * 4);
 
-    // 根据协议类型解析传输层
-    if (ip.protocol == 6) {  // TCP
-        struct tcphdr tcp;
-        bpf_skb_load_bytes(skb, l4_offset, &tcp, sizeof(tcp));
-        evt->src_port = bpf_ntohs(tcp.source);
-        evt->dst_port = bpf_ntohs(tcp.dest);
-    } else if (ip.protocol == 17) {  // UDP
-        struct udphdr udp;
-        bpf_skb_load_bytes(skb, l4_offset, &udp, sizeof(udp));
-        evt->src_port = bpf_ntohs(udp.source);
-        evt->dst_port = bpf_ntohs(udp.dest);
-    } else {
-        evt->src_port = 0;
-        evt->dst_port = 0;
-    }
+            // 根据协议类型解析传输层
+            if (ip.protocol == 6) {  // TCP
+                struct tcphdr tcp;
+                bpf_skb_load_bytes(skb, l4_offset, &tcp, sizeof(tcp));
+                evt->src_port = bpf_ntohs(tcp.source);
+                evt->dst_port = bpf_ntohs(tcp.dest);
+            } else if (ip.protocol == 17) {  // UDP
+                struct udphdr udp;
+                bpf_skb_load_bytes(skb, l4_offset, &udp, sizeof(udp));
+                evt->src_port = bpf_ntohs(udp.source);
+                evt->dst_port = bpf_ntohs(udp.dest);
+            } else {
+                evt->src_port = 0;
+                evt->dst_port = 0;
+            }
 
-    return 0;
-}
+            return 0;
+        }
 
-// 规则匹配函数 - 我们将修改这个部分
-static inline int match_rules(struct packet_event *evt) {
-    // 原有的硬编码检测逻辑
-    if (evt->protocol == 1) {  // ICMP
-        return 1;
-    }
+        // 规则匹配函数 - 我们将修改这个部分
+        static inline int match_rules(struct packet_event *evt) {
+            // 原有的硬编码检测逻辑
+            if (evt->protocol == 1) {  // ICMP
+                return 1000;  // 返回测试SID
+            }
 
-    // 新添加的动态规则检查
-    %s
+            // 新添加的动态规则检查
+            %s
 
-    return 0;
-}
+            return 0;
+        }
 
-// 主钩子函数 - 保持不变
-int ids_filter(struct __sk_buff *skb) {
-    struct packet_event evt = {};
+        // 主钩子函数 - 修复版本
+        int ids_filter(struct __sk_buff *skb) {
+            struct packet_event evt = {};
 
-    // 解析数据包
-    if (parse_packet(skb, &evt) < 0) {
-        return 0;
-    }
+            // 解析数据包
+            if (parse_packet(skb, &evt) < 0) {
+                return 0;
+            }
 
-    // 规则匹配
-    if (match_rules(&evt) > 0) {
-        events.perf_submit(skb, &evt, sizeof(evt));
-    }
+            // 规则匹配并设置SID
+            int matched_sid = match_rules(&evt);
+            if (matched_sid > 0) {
+                evt.sid = matched_sid;  // 关键：设置SID到事件结构
+                events.perf_submit(skb, &evt, sizeof(evt));
+            }
 
-    return 0;
-}
-"""
+            return 0;
+        }
+        """
 
     def _generate_rule_condition(self, rule):
         """为单条规则生成eBPF检测条件"""
