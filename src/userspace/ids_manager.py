@@ -186,37 +186,73 @@ class EventHandler:
         self.event_count = 0
         self.alert_count = 0
         self.last_alerts = {}  # 用于去重：(src_ip, dst_ip, sid) -> timestamp
-        
+
     def handle_event(self, cpu, data, size):
         """处理eBPF事件 - 现在事件来自编译后的规则"""
         import ctypes as ct
-    
+        from datetime import datetime
+        import time
+
         # 新的数据结构
         class PacketEvent(ct.Structure):
             _fields_ = [
                 ("src_ip", ct.c_uint32),
-                ("dst_ip", ct.c_uint32), 
+                ("dst_ip", ct.c_uint32),
                 ("src_port", ct.c_uint16),
                 ("dst_port", ct.c_uint16),
                 ("protocol", ct.c_uint8),
-                ("sid", ct.c_uint32),
+                ("sid", ct.c_uint32),  # 匹配的规则SID
             ]
-    
+
         try:
             event = ct.cast(data, ct.POINTER(PacketEvent)).contents
             self.event_count += 1
-        
+
             # 根据SID查找规则信息
             matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
-        
+
             if matched_rule and event.sid != 0:
+                # 去重检查
+                alert_key = (event.src_ip, event.dst_ip, event.sid)
+                current_time = time.time()
+
+                if alert_key in self.last_alerts:
+                    if current_time - self.last_alerts[alert_key] < 10:
+                        return  # 跳过重复告警
+
+                self.last_alerts[alert_key] = current_time
+                self.alert_count += 1
+
                 # 生成告警
-                self._generate_alert(event, matched_rule)
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                src_ip = self.format_ip(event.src_ip)
+                dst_ip = self.format_ip(event.dst_ip)
+
+                protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
+                protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
+
+                print(f"\n{'=' * 80}")
+                print(f"[ALERT #{self.alert_count}] {timestamp}")
+                print(f"{'=' * 80}")
+                print(f"规则: [{matched_rule['sid']}] {matched_rule['msg']}")
+                print(f"分类: {matched_rule['classtype']} | 优先级: {matched_rule['priority']}")
+                print(f"协议: {protocol_name}")
+                print(f"源地址: {src_ip}:{event.src_port}")
+                print(f"目标地址: {dst_ip}:{event.dst_port}")
+                print(f"{'=' * 80}\n")
             else:
-                # 普通流量日志
+                # 普通流量日志（降低输出频率）
                 if self.event_count % 100 == 0:
-                    self._log_traffic(event)
-                
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    src_ip = self.format_ip(event.src_ip)
+                    dst_ip = self.format_ip(event.dst_ip)
+                    protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
+                    protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
+
+                    print(
+                        f"[{timestamp}] [事件 #{self.event_count}] {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} "
+                        f"| {protocol_name}")
+
         except Exception as e:
             # 忽略处理错误，继续运行
             pass
@@ -291,15 +327,15 @@ class IDSManager:
         self.bpf = None
         self.rule_manager = RuleManager(rules_dir)
         self.event_handler = None
-        
+
     def load_ebpf_program(self):
         """加载eBPF程序 - 支持动态编译和回退"""
-    
+
         # 先尝试动态编译
         if self._load_dynamic_ebpf():
             print("✓ 使用动态编译的eBPF程序")
             return True
-    
+
         # 回退到原有的硬编码eBPF
         print("动态编译失败，回退到硬编码eBPF程序")
         return self._load_static_ebpf()
@@ -307,90 +343,64 @@ class IDSManager:
     def _load_dynamic_ebpf(self):
         """动态编译规则为eBPF程序"""
         try:
-            # 动态导入，避免循环依赖
             from rule_loader import RuleCompiler
-        
+
             print("正在动态编译规则为eBPF代码...")
-        
+
             # 获取所有规则
             rules = self.rule_manager.get_rules()
-        
+
             # 编译规则为eBPF代码
             compiler = RuleCompiler()
             ebpf_source = compiler.compile_rules(rules)
-        
+
             # 保存生成的代码用于调试
             with open("/tmp/generated_ebpf.c", "w") as f:
                 f.write(ebpf_source)
             print("生成的eBPF代码已保存到 /tmp/generated_ebpf.c")
-        
+
             print("编译动态eBPF程序...")
             self.bpf = BPF(text=ebpf_source)
             print("✓ 动态eBPF程序编译成功")
             return True
-        
+
         except Exception as e:
             print(f"动态编译失败: {e}")
-            import traceback
-            traceback.print_exc()
             return False
 
     def _load_static_ebpf(self):
         """加载原有的硬编码eBPF程序"""
         kernel_code_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
-            "kernel", 
+            "kernel",
             "ids_ebpf.c"
         )
-    
+
         try:
             print(f"正在加载硬编码eBPF程序: {kernel_code_path}")
             with open(kernel_code_path, 'r') as f:
                 kernel_code = f.read()
-        
+
             print("编译硬编码eBPF程序...")
             self.bpf = BPF(text=kernel_code)
             print("✓ 硬编码eBPF程序编译成功")
             return True
-        
+
         except Exception as e:
             print(f"✗ 加载eBPF程序失败: {e}")
             return False
-    
+
     def attach_probes(self):
         """附加探针到网络接口"""
-        # try:
-        #     print(f"附加 eBPF 程序到网络接口: {self.interface}")
-        #     function_ids_filter = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
-        #     BPF.attach_raw_socket(function_ids_filter, self.interface)
-        #     print(f"✓ 已附加到 {self.interface}")
-        #     return True
-        # except Exception as e:
-        #     print(f"✗ 附加探针失败: {e}")
-        #     print(f"提示: 请确保网络接口 '{self.interface}' 存在")
-        #     print(f"可用接口列表: 运行 'ip link show' 查看")
-        #     return False
         try:
             print(f"附加eBPF程序到网络接口: {self.interface}")
-        
-            # 使用XDP而不是socket filter以获得更好性能
-            function = self.bpf.load_func("xdp_snort_filter", BPF.XDP)
-            self.bpf.attach_xdp(self.interface, function, 0)
-        
-            print(f"✓ 已附加XDP程序到 {self.interface}")
-            return True
-        except Exception as e:
-            print(f"✗ 附加XDP程序失败: {e}")
-            # 回退到socket filter
-            return self._attach_socket_filter()
 
-    def _attach_socket_filter(self):
-        """回退方案：使用socket filter"""
-        try:
-            function = self.bpf.load_func("xdp_snort_filter", BPF.SOCKET_FILTER)
-            BPF.attach_raw_socket(function, self.interface)
-            print(f"✓ 已附加Socket Filter到 {self.interface}")
+            # 使用socket filter（与硬编码版本保持一致）
+            function_ids_filter = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
+            self.bpf.attach_raw_socket(function_ids_filter, self.interface)
+            print(f"✓ 已附加到 {self.interface}")
             return True
+
         except Exception as e:
             print(f"✗ 附加探针失败: {e}")
             return False

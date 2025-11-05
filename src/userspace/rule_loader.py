@@ -285,12 +285,12 @@ class RuleParser:
         return compiled_rules
 
 
+# 在 rule_loader.py 文件末尾添加：
 
 class RuleCompiler:
     """规则编译器 - 将JSON规则编译为eBPF代码"""
-    
+
     def __init__(self):
-        # 使用更兼容的头文件
         self.ebpf_header = """
 #include <uapi/linux/bpf.h>
 #include <uapi/linux/if_ether.h>
@@ -299,11 +299,10 @@ class RuleCompiler:
 #include <uapi/linux/udp.h>
 #include <uapi/linux/icmp.h>
 #include <uapi/linux/in.h>
-#include <linux/types.h>
 
 #define SEC(NAME) __attribute__((section(NAME), used))
 
-/* 简化的事件结构 */
+/* 事件结构 */
 struct packet_event {
     __u32 src_ip;
     __u32 dst_ip;
@@ -313,64 +312,40 @@ struct packet_event {
     __u32 sid;
 };
 
-/* 简化的BPF映射定义 */
-struct bpf_map_def {
-    __u32 type;
-    __u32 key_size;
-    __u32 value_size;
-    __u32 max_entries;
-    __u32 map_flags;
-    __u32 inner_map_idx;
-};
-
-/* 事件输出映射 */
-struct bpf_map_def SEC("maps") events = {
-    .type = 1,  // BPF_MAP_TYPE_PERF_EVENT_ARRAY
-    .key_size = sizeof(int),
-    .value_size = sizeof(__u32),
-    .max_entries = 1024,
-};
-
 /* 辅助函数 */
 static __always_inline int check_bounds(void *ptr, void *data_end, __u64 size) {
     return (void *)ptr + size <= data_end;
 }
 
-/* 字节序转换 */
-static __always_inline __u16 bpf_htons(__u16 x) {
-    return (__u16)((x << 8) | (x >> 8));
-}
-
-static __always_inline __u16 bpf_ntohs(__u16 x) {
-    return bpf_htons(x);
-}
+/* 使用BPF宏定义映射 */
+BPF_PERF_OUTPUT(events);
 """
         self.ebpf_footer = """
-/* 主XDP处理函数 */
-SEC("xdp")
-int xdp_snort_filter(struct xdp_md *ctx) {
-    void *data_end = (void *)(long)ctx->data_end;
-    void *data = (void *)(long)ctx->data;
-    
+/* 主处理函数 - 与硬编码版本保持一致 */
+SEC("socket")
+int ids_filter(struct __sk_buff *skb) {
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+
     struct ethhdr *eth = data;
     if (!check_bounds(eth, data_end, sizeof(*eth))) 
-        return XDP_PASS;
-    
+        return 0;
+
     if (eth->h_proto != bpf_htons(0x0800))  // ETH_P_IP
-        return XDP_PASS;
-    
+        return 0;
+
     struct iphdr *iph = (void *)eth + sizeof(*eth);
     if (!check_bounds(iph, data_end, sizeof(*iph))) 
-        return XDP_PASS;
-    
+        return 0;
+
     struct packet_event evt = {};
     evt.src_ip = iph->saddr;
     evt.dst_ip = iph->daddr;
     evt.protocol = iph->protocol;
-    
+
     // 传输层头部
     void *trans_header = (void *)iph + (iph->ihl * 4);
-    
+
     // TCP处理
     if (iph->protocol == 6) {  // IPPROTO_TCP
         struct tcphdr *tcp = trans_header;
@@ -387,78 +362,76 @@ int xdp_snort_filter(struct xdp_md *ctx) {
             evt.dst_port = bpf_ntohs(udp->dest);
         }
     }
-    
+
     // 规则检查
     %s
-    
-    return XDP_PASS;
+
+    return 0;
 }
+
+char _license[] SEC("license") = "GPL";
 """
-    
+
     def _generate_rule_function(self, rule, index):
         """为单条规则生成eBPF检测函数"""
         sid = rule.get('sid', 0)
         protocol = rule.get('protocol', 0)
-        
+
         conditions = []
-        
+
         # 协议检查
         if protocol != 0:
             conditions.append(f"if (iph->protocol != {protocol}) return 0;")
-        
-        # 端口检查 - 只处理TCP和UDP
+
+        # 端口检查
         port_type, val1, val2 = rule.get('dst_port', (0, 0, 0))
         if protocol == 6 and port_type == 1:  # TCP单个端口
-            conditions.append(f"if (evt.dst_port != {val1}) return 0;")
+            conditions.append(f"if (evt->dst_port != {val1}) return 0;")
         elif protocol == 6 and port_type == 2:  # TCP端口范围
-            conditions.append(f"if (evt.dst_port < {val1} || evt.dst_port > {val2}) return 0;")
+            conditions.append(f"if (evt->dst_port < {val1} || evt->dst_port > {val2}) return 0;")
         elif protocol == 17 and port_type == 1:  # UDP单个端口
-            conditions.append(f"if (evt.dst_port != {val1}) return 0;")
-        
+            conditions.append(f"if (evt->dst_port != {val1}) return 0;")
+
         # 生成函数代码
         function_code = f"""
 /* 规则 {index}: SID {sid} */
-static __always_inline int check_rule_{index}(struct iphdr *iph, struct packet_event *evt) {{
+static __always_inline int check_rule_{index}(struct iphdr *iph, struct packet_event *evt, struct __sk_buff *skb) {{
     {chr(10).join(['    ' + cond for cond in conditions])}
-    
+
     evt->sid = {sid};
-    
+
     // 提交事件到用户空间
-    long result = bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, 
-                                       evt, sizeof(*evt));
+    events.perf_submit(skb, evt, sizeof(*evt));
     return 1;
 }}
 """
         return function_code
-    
+
     def _generate_rule_call(self, index):
         """生成规则调用代码"""
-        return f"    check_rule_{index}(iph, &evt);"
-    
+        return f"    check_rule_{index}(iph, &evt, skb);"
+
     def compile_rules(self, rules):
         """编译所有规则为eBPF代码"""
         print("正在编译规则为eBPF代码...")
-        
+
         # 生成所有规则函数
         rule_functions = []
         rule_calls = []
-        
-        # 先处理TCP规则（更常见）
-        tcp_rules = [r for r in rules if r.get('protocol') == 6]
-        udp_rules = [r for r in rules if r.get('protocol') == 17]
-        other_rules = [r for r in rules if r.get('protocol') not in [6, 17]]
-        
-        # 限制总数避免验证器错误
-        all_rules = tcp_rules[:200] + udp_rules[:100] + other_rules[:50]
-        
-        for i, rule in enumerate(all_rules):
+
+        # 选择前50条规则进行测试（避免验证器错误）
+        test_rules = rules[:50]
+
+        print(f"选择 {len(test_rules)} 条规则进行测试编译...")
+
+        for i, rule in enumerate(test_rules):
             rule_functions.append(self._generate_rule_function(rule, i))
             rule_calls.append(self._generate_rule_call(i))
-        
+
         # 组合完整eBPF代码
-        complete_ebpf = (self.ebpf_header + 
-                        "\n".join(rule_functions) + 
-                        self.ebpf_footer % "\n".join(rule_calls))
-        
+        complete_ebpf = (self.ebpf_header +
+                         "\n".join(rule_functions) +
+                         self.ebpf_footer % "\n".join(rule_calls))
+
         print(f"✓ 成功编译 {len(rule_functions)} 条规则到eBPF")
         return complete_ebpf
