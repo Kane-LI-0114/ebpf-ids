@@ -424,9 +424,9 @@ int ids_filter(struct __sk_buff *skb) {
         specific_rules = []  # 有具体端口条件的规则
         generic_rules = []  # 只有协议条件的通用规则
 
-        test_rules = rules[:100]  # 你选择的100条规则
+        # test_rules = rules[:100]  # 你选择的100条规则
 
-        for rule in test_rules:
+        for rule in rules:
             port_type, val1, val2 = rule.get('dst_port', (0, 0, 0))
             protocol = rule.get('protocol', 0)
 
