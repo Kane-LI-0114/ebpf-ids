@@ -214,24 +214,24 @@ class EventHandler:
             self.event_count += 1
 
             # 详细调试信息 - 每10个事件输出一次
-            if self.event_count % 10 == 0:
-                src_ip = self.format_ip(event.src_ip)
-                dst_ip = self.format_ip(event.dst_ip)
-                protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
-                protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
-
-                print(f"[调试] 事件 #{self.event_count}")
-                print(f"      SID: {event.sid}")
-                print(f"      协议: {protocol_name}")
-                print(f"      源: {src_ip}:{event.src_port}")
-                print(f"      目标: {dst_ip}:{event.dst_port}")
-
-                # 检查规则查找
-                matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
-                if matched_rule:
-                    print(f"      找到规则: {matched_rule['msg'][:30]}...")
-                else:
-                    print(f"      ❌ 未找到规则 SID={event.sid}")
+            # if self.event_count % 10 == 0:
+            #     src_ip = self.format_ip(event.src_ip)
+            #     dst_ip = self.format_ip(event.dst_ip)
+            #     protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
+            #     protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
+            #
+            #     print(f"[调试] 事件 #{self.event_count}")
+            #     print(f"      SID: {event.sid}")
+            #     print(f"      协议: {protocol_name}")
+            #     print(f"      源: {src_ip}:{event.src_port}")
+            #     print(f"      目标: {dst_ip}:{event.dst_port}")
+            #
+            #     # 检查规则查找
+            #     matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
+            #     if matched_rule:
+            #         print(f"      找到规则: {matched_rule['msg'][:30]}...")
+            #     else:
+            #         print(f"      ❌ 未找到规则 SID={event.sid}")
 
             # 正常的事件处理逻辑
             matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
