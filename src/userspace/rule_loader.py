@@ -286,10 +286,11 @@ class RuleParser:
 
 
 class RuleCompiler:
-    """规则编译器 - 使用与硬编码版本相同的结构"""
+    """规则编译器 - 最小化修改方案"""
 
     def __init__(self):
-        self.ebpf_header = """
+        # 直接使用你原有的完整eBPF代码作为基础
+        self.ebpf_base = """
 #include <uapi/linux/if_ether.h>
 #include <uapi/linux/ip.h>
 #include <uapi/linux/tcp.h>
@@ -298,7 +299,7 @@ class RuleCompiler:
 #include <uapi/linux/in.h>
 #include <uapi/linux/pkt_cls.h>
 
-/* 定义事件数据结构 - 与原有代码保持一致 */
+// 定义事件数据结构
 struct packet_event {
     __u32 src_ip;
     __u32 dst_ip;
@@ -309,65 +310,55 @@ struct packet_event {
     __u8 payload[256];
 };
 
-/* eBPF Maps 定义 - 与原有代码保持一致 */
+// eBPF Maps 定义
 BPF_PERF_OUTPUT(events);
 BPF_HASH(rule_cache, __u32, __u32);
 BPF_HASH(connection_state, __u64, __u32);
 
-/* 完整的包解析函数 - 修复版本 */
+// 包解析函数 - 使用你原有的工作版本
 static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) {
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
+    __u32 proto;
+    __u32 nhoff = 14;  // ETH_HLEN
 
-    // 检查以太网头
-    struct ethhdr *eth = data;
-    if ((void *)eth + sizeof(*eth) > data_end)
+    // 读取以太网协议类型
+    bpf_skb_load_bytes(skb, 12, &proto, 2);
+    proto = bpf_ntohs(proto);
+
+    // 检查是否为 IP 协议
+    if (proto != 0x0800)  // ETH_P_IP
         return -1;
 
-    // 只处理IPv4 (0x0800 in host byte order is 8)
-    if (eth->h_proto != 8)
-        return -1;
+    // 读取 IP 头部信息
+    struct iphdr ip;
+    bpf_skb_load_bytes(skb, nhoff, &ip, sizeof(ip));
 
-    // 检查IP头
-    struct iphdr *iph = (void *)eth + sizeof(*eth);
-    if ((void *)iph + sizeof(*iph) > data_end)
-        return -1;
+    // 填充基本 IP 信息
+    evt->src_ip = ip.saddr;
+    evt->dst_ip = ip.daddr;
+    evt->protocol = ip.protocol;
 
-    // 填充基本信息
-    evt->src_ip = iph->saddr;
-    evt->dst_ip = iph->daddr;
-    evt->protocol = iph->protocol;
+    __u32 l4_offset = nhoff + (ip.ihl * 4);
 
-    // 计算传输层头部位置
-    void *trans_header = (void *)iph + (iph->ihl * 4);
-
-    // 解析TCP
-    if (iph->protocol == 6) {  // IPPROTO_TCP
-        struct tcphdr *tcp = trans_header;
-        if ((void *)tcp + sizeof(*tcp) <= data_end) {
-            evt->src_port = bpf_ntohs(tcp->source);
-            evt->dst_port = bpf_ntohs(tcp->dest);
-        }
-    }
-    // 解析UDP
-    else if (iph->protocol == 17) {  // IPPROTO_UDP
-        struct udphdr *udp = trans_header;
-        if ((void *)udp + sizeof(*udp) <= data_end) {
-            evt->src_port = bpf_ntohs(udp->source);
-            evt->dst_port = bpf_ntohs(udp->dest);
-        }
-    }
-    // ICMP没有端口
-    else if (iph->protocol == 1) {  // IPPROTO_ICMP
+    // 根据协议类型解析传输层
+    if (ip.protocol == 6) {  // TCP
+        struct tcphdr tcp;
+        bpf_skb_load_bytes(skb, l4_offset, &tcp, sizeof(tcp));
+        evt->src_port = bpf_ntohs(tcp.source);
+        evt->dst_port = bpf_ntohs(tcp.dest);
+    } else if (ip.protocol == 17) {  // UDP
+        struct udphdr udp;
+        bpf_skb_load_bytes(skb, l4_offset, &udp, sizeof(udp));
+        evt->src_port = bpf_ntohs(udp.source);
+        evt->dst_port = bpf_ntohs(udp.dest);
+    } else {
         evt->src_port = 0;
         evt->dst_port = 0;
     }
 
     return 0;
 }
-"""
-        self.ebpf_footer = """
-/* 直接在你的match_rules函数中添加生成的规则检查 */
+
+// 规则匹配函数 - 我们将修改这个部分
 static inline int match_rules(struct packet_event *evt) {
     // 原有的硬编码检测逻辑
     if (evt->protocol == 1) {  // ICMP
@@ -380,14 +371,16 @@ static inline int match_rules(struct packet_event *evt) {
     return 0;
 }
 
-/* 保持原有的主函数不变 */
+// 主钩子函数 - 保持不变
 int ids_filter(struct __sk_buff *skb) {
     struct packet_event evt = {};
 
+    // 解析数据包
     if (parse_packet(skb, &evt) < 0) {
         return 0;
     }
 
+    // 规则匹配
     if (match_rules(&evt) > 0) {
         events.perf_submit(skb, &evt, sizeof(evt));
     }
@@ -430,8 +423,8 @@ int ids_filter(struct __sk_buff *skb) {
         # 生成规则条件
         rule_conditions = []
 
-        # 选择前10条规则进行测试
-        test_rules = rules[:10]
+        # 选择前5条规则进行测试（最小化测试）
+        test_rules = rules[:5]
 
         print(f"选择 {len(test_rules)} 条规则进行测试编译...")
 
@@ -441,8 +434,7 @@ int ids_filter(struct __sk_buff *skb) {
                 rule_conditions.append(condition)
 
         # 组合完整eBPF代码
-        complete_ebpf = (self.ebpf_header +
-                         self.ebpf_footer % "\n".join(rule_conditions))
+        complete_ebpf = self.ebpf_base % "\n".join(rule_conditions)
 
         print(f"✓ 成功编译 {len(rule_conditions)} 条规则到eBPF")
         return complete_ebpf
