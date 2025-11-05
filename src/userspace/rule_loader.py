@@ -283,3 +283,128 @@ class RuleParser:
             print(f"  警告: 还有 {error_count - 5} 条规则解析失败")
         
         return compiled_rules
+
+
+
+class RuleCompiler:
+    """规则编译器 - 将JSON规则编译为eBPF代码"""
+    
+    def __init__(self):
+        self.ebpf_header = """
+#include <linux/bpf.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
+#include <linux/icmp.h>
+#include <linux/in.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
+
+BPF_PERF_OUTPUT(events);
+
+struct packet_event {
+    __u32 src_ip;
+    __u32 dst_ip;
+    __u16 src_port;
+    __u16 dst_port;
+    __u8 protocol;
+    __u32 sid;  // 匹配的规则SID
+};
+
+// 辅助函数
+static __always_inline int check_bounds(void *ptr, void *data_end, __u64 size) {
+    return (void *)ptr + size <= data_end;
+}
+"""
+        self.ebpf_footer = """
+SEC("xdp")
+int xdp_snort_filter(struct xdp_md *ctx) {
+    void *data_end = (void *)(long)ctx->data_end;
+    void *data = (void *)(long)ctx->data;
+    
+    struct ethhdr *eth = data;
+    if (!check_bounds(eth, data_end, sizeof(*eth))) 
+        return XDP_PASS;
+    
+    if (eth->h_proto != bpf_htons(ETH_P_IP)) 
+        return XDP_PASS;
+    
+    struct iphdr *iph = (void *)eth + sizeof(*eth);
+    if (!check_bounds(iph, data_end, sizeof(*iph))) 
+        return XDP_PASS;
+    
+    struct packet_event evt = {};
+    evt.src_ip = iph->saddr;
+    evt.dst_ip = iph->daddr;
+    evt.protocol = iph->protocol;
+    
+    // 检查所有规则
+    %s
+    
+    return XDP_PASS;
+}
+
+char _license[] SEC("license") = "GPL";
+"""
+    
+    def _generate_rule_function(self, rule, index):
+        """为单条规则生成eBPF检测函数"""
+        sid = rule.get('sid', 0)
+        protocol = rule.get('protocol', 0)
+        
+        conditions = []
+        
+        # 协议检查
+        if protocol != 0:
+            conditions.append(f"if (iph->protocol != {protocol}) return 0;")
+        
+        # 端口检查
+        port_type, val1, val2 = rule.get('dst_port', (0, 0, 0))
+        if port_type == 1:  # 单个端口
+            conditions.append(f"if (bpf_ntohs(tcp->dest) != {val1}) return 0;")
+        elif port_type == 2:  # 端口范围
+            conditions.append(f"__u16 dport = bpf_ntohs(tcp->dest);")
+            conditions.append(f"if (dport < {val1} || dport > {val2}) return 0;")
+        
+        # 生成函数代码
+        function_code = f"""
+static __always_inline int check_rule_{index}(struct iphdr *iph, void *data_end, struct packet_event *evt) {{
+    // 规则 SID: {sid}
+    {chr(10).join(['    ' + cond for cond in conditions])}
+    
+    evt->sid = {sid};
+    return 1;
+}}
+"""
+        return function_code
+    
+    def _generate_rule_call(self, index):
+        """生成规则调用代码"""
+        return f"""
+    if (check_rule_{index}(iph, data_end, &evt)) {{
+        events.perf_submit(ctx, &evt, sizeof(evt));
+    }}"""
+    
+    def compile_rules(self, rules):
+        """编译所有规则为eBPF代码"""
+        print("正在编译规则为eBPF代码...")
+        
+        # 生成所有规则函数
+        rule_functions = []
+        rule_calls = []
+        
+        for i, rule in enumerate(rules):
+            if i >= 500:  # 限制规则数量，避免eBPF验证器错误
+                break
+                
+            rule_functions.append(self._generate_rule_function(rule, i))
+            rule_calls.append(self._generate_rule_call(i))
+        
+        # 组合完整eBPF代码
+        complete_ebpf = (self.ebpf_header + 
+                        "\n".join(rule_functions) + 
+                        self.ebpf_footer % "\n".join(rule_calls))
+        
+        print(f"✓ 成功编译 {len(rule_functions)} 条规则到eBPF")
+        return complete_ebpf
