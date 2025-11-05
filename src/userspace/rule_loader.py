@@ -290,34 +290,63 @@ class RuleCompiler:
     """规则编译器 - 将JSON规则编译为eBPF代码"""
     
     def __init__(self):
+        # 使用更兼容的头文件
         self.ebpf_header = """
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
-#include <linux/tcp.h>
-#include <linux/udp.h>
-#include <linux/icmp.h>
-#include <linux/in.h>
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_endian.h>
+#include <uapi/linux/bpf.h>
+#include <uapi/linux/if_ether.h>
+#include <uapi/linux/ip.h>
+#include <uapi/linux/tcp.h>
+#include <uapi/linux/udp.h>
+#include <uapi/linux/icmp.h>
+#include <uapi/linux/in.h>
+#include <linux/types.h>
 
-BPF_PERF_OUTPUT(events);
+#define SEC(NAME) __attribute__((section(NAME), used))
 
+/* 简化的事件结构 */
 struct packet_event {
     __u32 src_ip;
     __u32 dst_ip;
     __u16 src_port;
     __u16 dst_port;
     __u8 protocol;
-    __u32 sid;  // 匹配的规则SID
+    __u32 sid;
 };
 
-// 辅助函数
+/* 简化的BPF映射定义 */
+struct bpf_map_def {
+    __u32 type;
+    __u32 key_size;
+    __u32 value_size;
+    __u32 max_entries;
+    __u32 map_flags;
+    __u32 inner_map_idx;
+};
+
+/* 事件输出映射 */
+struct bpf_map_def SEC("maps") events = {
+    .type = 1,  // BPF_MAP_TYPE_PERF_EVENT_ARRAY
+    .key_size = sizeof(int),
+    .value_size = sizeof(__u32),
+    .max_entries = 1024,
+};
+
+/* 辅助函数 */
 static __always_inline int check_bounds(void *ptr, void *data_end, __u64 size) {
     return (void *)ptr + size <= data_end;
 }
+
+/* 字节序转换 */
+static __always_inline __u16 bpf_htons(__u16 x) {
+    return (__u16)((x << 8) | (x >> 8));
+}
+
+static __always_inline __u16 bpf_ntohs(__u16 x) {
+    return bpf_htons(x);
+}
 """
         self.ebpf_footer = """
+/* 主XDP处理函数 */
 SEC("xdp")
 int xdp_snort_filter(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
@@ -327,7 +356,7 @@ int xdp_snort_filter(struct xdp_md *ctx) {
     if (!check_bounds(eth, data_end, sizeof(*eth))) 
         return XDP_PASS;
     
-    if (eth->h_proto != bpf_htons(ETH_P_IP)) 
+    if (eth->h_proto != bpf_htons(0x0800))  // ETH_P_IP
         return XDP_PASS;
     
     struct iphdr *iph = (void *)eth + sizeof(*eth);
@@ -339,13 +368,31 @@ int xdp_snort_filter(struct xdp_md *ctx) {
     evt.dst_ip = iph->daddr;
     evt.protocol = iph->protocol;
     
-    // 检查所有规则
+    // 传输层头部
+    void *trans_header = (void *)iph + (iph->ihl * 4);
+    
+    // TCP处理
+    if (iph->protocol == 6) {  // IPPROTO_TCP
+        struct tcphdr *tcp = trans_header;
+        if (check_bounds(tcp, data_end, sizeof(*tcp))) {
+            evt.src_port = bpf_ntohs(tcp->source);
+            evt.dst_port = bpf_ntohs(tcp->dest);
+        }
+    }
+    // UDP处理  
+    else if (iph->protocol == 17) {  // IPPROTO_UDP
+        struct udphdr *udp = trans_header;
+        if (check_bounds(udp, data_end, sizeof(*udp))) {
+            evt.src_port = bpf_ntohs(udp->source);
+            evt.dst_port = bpf_ntohs(udp->dest);
+        }
+    }
+    
+    // 规则检查
     %s
     
     return XDP_PASS;
 }
-
-char _license[] SEC("license") = "GPL";
 """
     
     def _generate_rule_function(self, rule, index):
@@ -359,21 +406,26 @@ char _license[] SEC("license") = "GPL";
         if protocol != 0:
             conditions.append(f"if (iph->protocol != {protocol}) return 0;")
         
-        # 端口检查
+        # 端口检查 - 只处理TCP和UDP
         port_type, val1, val2 = rule.get('dst_port', (0, 0, 0))
-        if port_type == 1:  # 单个端口
-            conditions.append(f"if (bpf_ntohs(tcp->dest) != {val1}) return 0;")
-        elif port_type == 2:  # 端口范围
-            conditions.append(f"__u16 dport = bpf_ntohs(tcp->dest);")
-            conditions.append(f"if (dport < {val1} || dport > {val2}) return 0;")
+        if protocol == 6 and port_type == 1:  # TCP单个端口
+            conditions.append(f"if (evt.dst_port != {val1}) return 0;")
+        elif protocol == 6 and port_type == 2:  # TCP端口范围
+            conditions.append(f"if (evt.dst_port < {val1} || evt.dst_port > {val2}) return 0;")
+        elif protocol == 17 and port_type == 1:  # UDP单个端口
+            conditions.append(f"if (evt.dst_port != {val1}) return 0;")
         
         # 生成函数代码
         function_code = f"""
-static __always_inline int check_rule_{index}(struct iphdr *iph, void *data_end, struct packet_event *evt) {{
-    // 规则 SID: {sid}
+/* 规则 {index}: SID {sid} */
+static __always_inline int check_rule_{index}(struct iphdr *iph, struct packet_event *evt) {{
     {chr(10).join(['    ' + cond for cond in conditions])}
     
     evt->sid = {sid};
+    
+    // 提交事件到用户空间
+    long result = bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, 
+                                       evt, sizeof(*evt));
     return 1;
 }}
 """
@@ -381,10 +433,7 @@ static __always_inline int check_rule_{index}(struct iphdr *iph, void *data_end,
     
     def _generate_rule_call(self, index):
         """生成规则调用代码"""
-        return f"""
-    if (check_rule_{index}(iph, data_end, &evt)) {{
-        events.perf_submit(ctx, &evt, sizeof(evt));
-    }}"""
+        return f"    check_rule_{index}(iph, &evt);"
     
     def compile_rules(self, rules):
         """编译所有规则为eBPF代码"""
@@ -394,10 +443,15 @@ static __always_inline int check_rule_{index}(struct iphdr *iph, void *data_end,
         rule_functions = []
         rule_calls = []
         
-        for i, rule in enumerate(rules):
-            if i >= 500:  # 限制规则数量，避免eBPF验证器错误
-                break
-                
+        # 先处理TCP规则（更常见）
+        tcp_rules = [r for r in rules if r.get('protocol') == 6]
+        udp_rules = [r for r in rules if r.get('protocol') == 17]
+        other_rules = [r for r in rules if r.get('protocol') not in [6, 17]]
+        
+        # 限制总数避免验证器错误
+        all_rules = tcp_rules[:200] + udp_rules[:100] + other_rules[:50]
+        
+        for i, rule in enumerate(all_rules):
             rule_functions.append(self._generate_rule_function(rule, i))
             rule_calls.append(self._generate_rule_call(i))
         

@@ -195,26 +195,31 @@ class EventHandler:
         class PacketEvent(ct.Structure):
             _fields_ = [
                 ("src_ip", ct.c_uint32),
-                ("dst_ip", ct.c_uint32),
+                ("dst_ip", ct.c_uint32), 
                 ("src_port", ct.c_uint16),
                 ("dst_port", ct.c_uint16),
                 ("protocol", ct.c_uint8),
-                ("sid", ct.c_uint32),  # 匹配的规则SID
+                ("sid", ct.c_uint32),
             ]
     
-        event = ct.cast(data, ct.POINTER(PacketEvent)).contents
-        self.event_count += 1
-    
-        # 根据SID查找规则信息
-        matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
-    
-        if matched_rule:
-            # 生成告警
-            self._generate_alert(event, matched_rule)
-        else:
-            # 普通流量日志
-            if self.event_count % 100 == 0:
-                self._log_traffic(event)
+        try:
+            event = ct.cast(data, ct.POINTER(PacketEvent)).contents
+            self.event_count += 1
+        
+            # 根据SID查找规则信息
+            matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
+        
+            if matched_rule and event.sid != 0:
+                # 生成告警
+                self._generate_alert(event, matched_rule)
+            else:
+                # 普通流量日志
+                if self.event_count % 100 == 0:
+                    self._log_traffic(event)
+                
+        except Exception as e:
+            # 忽略处理错误，继续运行
+            pass
 
     def _generate_alert(self, event, rule):
         """生成规则匹配告警"""
@@ -288,33 +293,24 @@ class IDSManager:
         self.event_handler = None
         
     def load_ebpf_program(self):
-        # """加载 eBPF 程序"""
-        # kernel_code_path = os.path.join(
-        #     os.path.dirname(os.path.dirname(__file__)),
-        #     "kernel",
-        #     "ids_ebpf.c"
-        # )
-        # 
-        # try:
-        #     print(f"正在加载 eBPF 程序: {kernel_code_path}")
-        #     with open(kernel_code_path, 'r') as f:
-        #         kernel_code = f.read()
-        #     
-        #     print("编译 eBPF 程序...")
-        #     self.bpf = BPF(text=kernel_code)
-        #     print("✓ eBPF 程序编译成功")
-        #     
-        # except Exception as e:
-        #     print(f"✗ 加载 eBPF 程序失败: {e}")
-        #     return False
-        # 
-        # return True
-
-        # 从 rule_loader 导入编译器
-        from rule_loader import RuleCompiler
+        """加载eBPF程序 - 支持动态编译和回退"""
     
+        # 先尝试动态编译
+        if self._load_dynamic_ebpf():
+            print("✓ 使用动态编译的eBPF程序")
+            return True
+    
+        # 回退到原有的硬编码eBPF
+        print("动态编译失败，回退到硬编码eBPF程序")
+        return self._load_static_ebpf()
+
+    def _load_dynamic_ebpf(self):
+        """动态编译规则为eBPF程序"""
         try:
-            print("正在动态编译eBPF规则程序...")
+            # 动态导入，避免循环依赖
+            from rule_loader import RuleCompiler
+        
+            print("正在动态编译规则为eBPF代码...")
         
             # 获取所有规则
             rules = self.rule_manager.get_rules()
@@ -323,15 +319,42 @@ class IDSManager:
             compiler = RuleCompiler()
             ebpf_source = compiler.compile_rules(rules)
         
-            # 使用BCC编译
-            print("编译eBPF程序...")
-            self.bpf = BPF(text=ebpf_source)
-            print("✓ eBPF程序编译成功")
+            # 保存生成的代码用于调试
+            with open("/tmp/generated_ebpf.c", "w") as f:
+                f.write(ebpf_source)
+            print("生成的eBPF代码已保存到 /tmp/generated_ebpf.c")
         
+            print("编译动态eBPF程序...")
+            self.bpf = BPF(text=ebpf_source)
+            print("✓ 动态eBPF程序编译成功")
             return True
         
         except Exception as e:
-            print(f"✗ 动态编译eBPF程序失败: {e}")
+            print(f"动态编译失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _load_static_ebpf(self):
+        """加载原有的硬编码eBPF程序"""
+        kernel_code_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "kernel", 
+            "ids_ebpf.c"
+        )
+    
+        try:
+            print(f"正在加载硬编码eBPF程序: {kernel_code_path}")
+            with open(kernel_code_path, 'r') as f:
+                kernel_code = f.read()
+        
+            print("编译硬编码eBPF程序...")
+            self.bpf = BPF(text=kernel_code)
+            print("✓ 硬编码eBPF程序编译成功")
+            return True
+        
+        except Exception as e:
+            print(f"✗ 加载eBPF程序失败: {e}")
             return False
     
     def attach_probes(self):
