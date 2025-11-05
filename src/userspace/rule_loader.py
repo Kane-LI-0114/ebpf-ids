@@ -285,7 +285,6 @@ class RuleParser:
         return compiled_rules
 
 
-# 在 rule_loader.py 文件末尾添加：
 
 class RuleCompiler:
     """规则编译器 - 将JSON规则编译为eBPF代码"""
@@ -369,7 +368,7 @@ int ids_filter(struct __sk_buff *skb) {
     return 0;
 }
 
-char _license[] SEC("license") = "GPL";
+/* 注意：不要手动定义 _license，BCC会自动添加 */
 """
 
     def _generate_rule_function(self, rule, index):
