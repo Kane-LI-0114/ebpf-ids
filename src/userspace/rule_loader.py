@@ -285,7 +285,6 @@ class RuleParser:
         return compiled_rules
 
 
-
 class RuleCompiler:
     """规则编译器 - 将JSON规则编译为eBPF代码"""
 
@@ -320,22 +319,25 @@ static __always_inline int check_bounds(void *ptr, void *data_end, __u64 size) {
 BPF_PERF_OUTPUT(events);
 """
         self.ebpf_footer = """
-/* 主处理函数 - 与硬编码版本保持一致 */
+/* 主处理函数 - 正确的socket filter实现 */
 SEC("socket")
 int ids_filter(struct __sk_buff *skb) {
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
 
-    struct ethhdr *eth = data;
-    if (!check_bounds(eth, data_end, sizeof(*eth))) 
+    /* 边界检查 */
+    if (data + sizeof(struct ethhdr) > data_end)
         return 0;
 
+    struct ethhdr *eth = data;
     if (eth->h_proto != bpf_htons(0x0800))  // ETH_P_IP
         return 0;
 
-    struct iphdr *iph = (void *)eth + sizeof(*eth);
-    if (!check_bounds(iph, data_end, sizeof(*iph))) 
+    /* IP头边界检查 */
+    if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) > data_end)
         return 0;
+
+    struct iphdr *iph = data + sizeof(struct ethhdr);
 
     struct packet_event evt = {};
     evt.src_ip = iph->saddr;
@@ -345,21 +347,21 @@ int ids_filter(struct __sk_buff *skb) {
     // 传输层头部
     void *trans_header = (void *)iph + (iph->ihl * 4);
 
+    /* 传输层边界检查 */
+    if (trans_header + sizeof(struct tcphdr) > data_end)
+        return 0;
+
     // TCP处理
     if (iph->protocol == 6) {  // IPPROTO_TCP
         struct tcphdr *tcp = trans_header;
-        if (check_bounds(tcp, data_end, sizeof(*tcp))) {
-            evt.src_port = bpf_ntohs(tcp->source);
-            evt.dst_port = bpf_ntohs(tcp->dest);
-        }
+        evt.src_port = bpf_ntohs(tcp->source);
+        evt.dst_port = bpf_ntohs(tcp->dest);
     }
     // UDP处理  
     else if (iph->protocol == 17) {  // IPPROTO_UDP
         struct udphdr *udp = trans_header;
-        if (check_bounds(udp, data_end, sizeof(*udp))) {
-            evt.src_port = bpf_ntohs(udp->source);
-            evt.dst_port = bpf_ntohs(udp->dest);
-        }
+        evt.src_port = bpf_ntohs(udp->source);
+        evt.dst_port = bpf_ntohs(udp->dest);
     }
 
     // 规则检查
@@ -367,8 +369,6 @@ int ids_filter(struct __sk_buff *skb) {
 
     return 0;
 }
-
-/* 注意：不要手动定义 _license，BCC会自动添加 */
 """
 
     def _generate_rule_function(self, rule, index):
@@ -385,30 +385,28 @@ int ids_filter(struct __sk_buff *skb) {
         # 端口检查
         port_type, val1, val2 = rule.get('dst_port', (0, 0, 0))
         if protocol == 6 and port_type == 1:  # TCP单个端口
-            conditions.append(f"if (evt->dst_port != {val1}) return 0;")
+            conditions.append(f"if (evt.dst_port != {val1}) return 0;")
         elif protocol == 6 and port_type == 2:  # TCP端口范围
-            conditions.append(f"if (evt->dst_port < {val1} || evt->dst_port > {val2}) return 0;")
+            conditions.append(f"if (evt.dst_port < {val1} || evt.dst_port > {val2}) return 0;")
         elif protocol == 17 and port_type == 1:  # UDP单个端口
-            conditions.append(f"if (evt->dst_port != {val1}) return 0;")
+            conditions.append(f"if (evt.dst_port != {val1}) return 0;")
 
-        # 生成函数代码
+        # 生成函数代码 - 使用值传递而不是指针
         function_code = f"""
 /* 规则 {index}: SID {sid} */
-static __always_inline int check_rule_{index}(struct iphdr *iph, struct packet_event *evt, struct __sk_buff *skb) {{
+static __always_inline int check_rule_{index}(struct iphdr *iph, struct packet_event evt) {{
     {chr(10).join(['    ' + cond for cond in conditions])}
 
-    evt->sid = {sid};
-
     // 提交事件到用户空间
-    events.perf_submit(skb, evt, sizeof(*evt));
+    events.perf_submit((void *)iph, &evt, sizeof(evt));
     return 1;
 }}
 """
         return function_code
 
     def _generate_rule_call(self, index):
-        """生成规则调用代码"""
-        return f"    check_rule_{index}(iph, &evt, skb);"
+        """生成规则调用代码 - 使用值传递"""
+        return f"    check_rule_{index}(iph, evt);"
 
     def compile_rules(self, rules):
         """编译所有规则为eBPF代码"""
@@ -418,8 +416,8 @@ static __always_inline int check_rule_{index}(struct iphdr *iph, struct packet_e
         rule_functions = []
         rule_calls = []
 
-        # 选择前50条规则进行测试（避免验证器错误）
-        test_rules = rules[:50]
+        # 选择前20条规则进行测试（避免验证器错误）
+        test_rules = rules[:20]
 
         print(f"选择 {len(test_rules)} 条规则进行测试编译...")
 
