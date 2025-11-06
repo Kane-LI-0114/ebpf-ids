@@ -434,7 +434,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
         lines.append("    /* rule %d end */" % sid)
         return "\n".join(lines)
 
-    def compile_rules_inline(self, rules, max_content_depth=8, max_inline_rules=200):
+    def compile_rules_inline(self, rules, max_content_depth=8, max_inline_rules=10):
         """
         生成 BCC socket-filter 风格的 eBPF 源码（更保守、安全）：
           - 不使用 label/goto，所有规则以 if-block 内联到 ids_filter 中
