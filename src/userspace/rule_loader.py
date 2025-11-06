@@ -303,7 +303,6 @@ class RuleCompiler:
 #include <linux/if_arp.h>
 #include <linux/if_ether.h>
 #include <linux/types.h>
-#include <bpf/bpf_helpers.h>
 
 struct packet_event {
     __u32 src_ip;
