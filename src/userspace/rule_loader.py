@@ -8,6 +8,7 @@
 import os
 import json
 import re
+import binascii
 
 try:
     import yaml
@@ -287,262 +288,124 @@ class RuleParser:
 
 class RuleCompiler:
     def __init__(self):
-        self.ebpf_template = """
-        #include <uapi/linux/if_ether.h>
-        #include <uapi/linux/ip.h>
-        #include <uapi/linux/tcp.h>
-        #include <uapi/linux/udp.h>
-        #include <uapi/linux/icmp.h>
-        
-        // 规则键值结构
-        struct rule_key {
-            __u32 protocol;
-            __u16 src_port;
-            __u16 dst_port;
-            __u32 src_ip_mask;
-            __u32 dst_ip_mask;
-        };
-        
-        struct rule_value {
-            __u32 sid;
-            __u32 action;
-            __u32 priority;
-            __u8 content[32];
-            __u8 content_len;
-        };
-        
-        // 定义事件数据结构
-        struct packet_event {
-            __u32 src_ip;
-            __u32 dst_ip;
-            __u16 src_port;
-            __u16 dst_port;
-            __u8 protocol;
-            __u32 sid;
-            __u32 payload_len;
-            __u8 payload[256];
-        };
-        
-        // 事件输出Map
-        BPF_PERF_OUTPUT(events);
-        
-        // 定义规则Map
-        BPF_HASH(rules_map, struct rule_key, struct rule_value, 1000);
-        
-        // 统计Map
-        BPF_HASH(rule_stats, __u32, __u64, 1000);
-        
-        // 包解析函数
-        static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) {
-            __u32 proto;
-            __u32 nhoff = 14;
-        
-            bpf_skb_load_bytes(skb, 12, &proto, 2);
-            proto = bpf_ntohs(proto);
-        
-            if (proto != 0x0800)
-                return -1;
-        
-            struct iphdr ip;
-            bpf_skb_load_bytes(skb, nhoff, &ip, sizeof(ip));
-        
-            evt->src_ip = ip.saddr;
-            evt->dst_ip = ip.daddr;
-            evt->protocol = ip.protocol;
-            evt->sid = 0;
-        
-            __u32 l4_offset = nhoff + (ip.ihl * 4);
-        
-            if (ip.protocol == 6) {
-                struct tcphdr tcp;
-                bpf_skb_load_bytes(skb, l4_offset, &tcp, sizeof(tcp));
-                evt->src_port = bpf_ntohs(tcp.source);
-                evt->dst_port = bpf_ntohs(tcp.dest);
-            } else if (ip.protocol == 17) {
-                struct udphdr udp;
-                bpf_skb_load_bytes(skb, l4_offset, &udp, sizeof(udp));
-                evt->src_port = bpf_ntohs(udp.source);
-                evt->dst_port = bpf_ntohs(udp.dest);
-            } else {
-                evt->src_port = 0;
-                evt->dst_port = 0;
-            }
-        
-            return 0;
-        }
-        
-        // 通用的规则匹配函数
-        static inline int match_rules_with_map(struct packet_event *evt) {
-            struct rule_key key = {
-                .protocol = evt->protocol,
-                .src_port = evt->src_port,
-                .dst_port = evt->dst_port,
-                .src_ip_mask = 0xFFFFFFFF,
-                .dst_ip_mask = 0xFFFFFFFF
-            };
-        
-            struct rule_value *rule = rules_map.lookup(&key);
-            if (rule) {
-                __u32 sid = rule->sid;
-                __u64 *count = rule_stats.lookup(&sid);
-                if (count) {
-                    (*count)++;
-                } else {
-                    __u64 init_count = 1;
-                    rule_stats.update(&sid, &init_count);
-                }
-                return sid;
-            }
-        
-            return 0;
-        }
-        
-        // 主钩子函数
-        int ids_filter(struct __sk_buff *skb) {
-            struct packet_event evt = {};
-        
-            if (parse_packet(skb, &evt) < 0) {
-                return 0;
-            }
-        
-            int matched_sid = match_rules_with_map(&evt);
-            if (matched_sid > 0) {
-                evt.sid = matched_sid;
-                events.perf_submit(skb, &evt, sizeof(evt));
-            }
-        
-            return 0;
-        }
-        
-        // 用户空间加载规则的辅助函数（如果需要的话）
-        static inline void load_rule_to_map(__u32 protocol, __u16 src_port, __u16 dst_port, 
-                                           __u32 sid, __u32 action, __u32 priority) {
-            struct rule_key key = {
-                .protocol = protocol,
-                .src_port = src_port,
-                .dst_port = dst_port,
-                .src_ip_mask = 0xFFFFFFFF,
-                .dst_ip_mask = 0xFFFFFFFF
-            };
-        
-            struct rule_value value = {
-                .sid = sid,
-                .action = action,
-                .priority = priority,
-                .content_len = 0
-            };
-        
-            rules_map.update(&key, &value);
-        }
-        """
+        # 通用头文件部分（保持不变）
+        self.header = """
+#include <uapi/linux/if_ether.h>
+#include <uapi/linux/ip.h>
+#include <uapi/linux/tcp.h>
+#include <uapi/linux/udp.h>
+#include <uapi/linux/icmp.h>
 
-    def _generate_rule_condition(self, rule):
-        """为单条规则生成eBPF检测条件"""
-        sid = rule.get('sid', 0)
-        protocol = rule.get('protocol', 0)
+struct packet_event {
+    __u32 src_ip;
+    __u32 dst_ip;
+    __u16 src_port;
+    __u16 dst_port;
+    __u8 protocol;
+    __u32 sid;
+};
 
-        conditions = []
+BPF_PERF_OUTPUT(events);
+BPF_HASH(rule_stats, __u32, __u64, 1000);
 
-        # 协议检查
-        if protocol != 0:
-            conditions.append(f"evt->protocol == {protocol}")
+// 辅助边界检查函数
+static __always_inline bool check_bound(void *start, void *end, __u64 size) {
+    return (start + size) <= end;
+}
+"""
 
-        # 端口检查
-        port_type, val1, val2 = rule.get('dst_port', (0, 0, 0))
-        if protocol == 6 and port_type == 1:  # TCP单个端口
-            conditions.append(f"evt->dst_port == {val1}")
-        elif protocol == 6 and port_type == 2:  # TCP端口范围
-            conditions.append(f"(evt->dst_port >= {val1} && evt->dst_port <= {val2})")
-        elif protocol == 17 and port_type == 1:  # UDP单个端口
-            conditions.append(f"evt->dst_port == {val1}")
+    def _generate_rule_func(self, rule):
+        """生成单条规则的检测函数"""
+        sid = rule["sid"]
+        proto = rule["protocol"]
+        proto_name = {6: "IPPROTO_TCP", 17: "IPPROTO_UDP", 1: "IPPROTO_ICMP"}.get(proto, "IPPROTO_IP")
 
-        # 生成完整的if条件
-        if conditions:
-            condition_str = " && ".join(conditions)
-            return f"    if ({condition_str}) return {sid};"
-        else:
-            return f"    return {sid};"
+        code = [f"/* === Rule SID {sid}: {rule.get('msg','')} === */"]
+        code.append(f"static __always_inline int check_rule_{sid}(struct iphdr *iph, void *data_end, void *data) {{")
 
-    def compile_rules(self, rules):
-        """生成基于Map的规则系统"""
-        print("正在生成基于Map的规则系统...")
+        # 协议匹配
+        code.append(f"    if (iph->protocol != {proto_name}) return 0;")
 
-        # 直接返回完整的 eBPF 模板
-        # 不需要插入任何条件链，因为现在使用 Map 匹配
-        print("✓ 生成基于Map的规则系统完成")
-        return self.ebpf_template
+        # TCP 头解析
+        if proto == 6:
+            code.append("    struct tcphdr *tcph = (void *)iph + (iph->ihl * 4);")
+            code.append("    if (!check_bound(tcph, data_end, sizeof(*tcph))) return 0;")
+        elif proto == 17:
+            code.append("    struct udphdr *udph = (void *)iph + (iph->ihl * 4);")
+            code.append("    if (!check_bound(udph, data_end, sizeof(*udph))) return 0;")
 
-    def _generate_map_matcher(self):
-        """生成通用的Map匹配函数"""
-        return """
-    // 通用的规则匹配函数
-    static inline int match_rules_with_map(struct packet_event *evt) {
-        struct rule_key key = {
-            .protocol = evt->protocol,
-            .src_port = evt->src_port,
-            .dst_port = evt->dst_port,
-            .src_ip_mask = 0xFFFFFFFF,  // 精确匹配
-            .dst_ip_mask = 0xFFFFFFFF
-        };
+        # 端口匹配
+        ptype, val1, val2 = rule.get("dst_port", (0, 0, 0))
+        if ptype == 1:
+            code.append(f"    if (bpf_ntohs(tcph->dest) != {val1}) return 0;")
+        elif ptype == 2:
+            code.append(f"    if (!(bpf_ntohs(tcph->dest) >= {val1} && bpf_ntohs(tcph->dest) <= {val2})) return 0;")
 
-        // 在Map中查找规则
-        struct rule_value *rule = rules_map.lookup(&key);
-        if (rule) {
-            // 更新统计
-            __u32 sid = rule->sid;
-            __u64 *count = rule_stats.lookup(&sid);
-            if (count) {
-                (*count)++;
-            } else {
-                __u64 init_count = 1;
-                rule_stats.update(&sid, &init_count);
-            }
-            return sid;
-        }
+        # flow 状态匹配
+        direction = rule.get("flow_direction", 0)
+        state = rule.get("flow_state", 0)
+        if direction or state:
+            comment = []
+            if direction == 1:
+                comment.append("to_client")
+            elif direction == 2:
+                comment.append("to_server")
+            if state == 1:
+                comment.append("established")
+            elif state == 2:
+                comment.append("stateless")
+            code.append(f"    // flow: {'/'.join(comment)} (TODO: 连接状态跟踪)")
 
-        return 0;
-    }
+        # 内容匹配
+        content = rule.get("content", b"")
+        if content and len(content) > 0:
+            hexdata = ", ".join(f"0x{b:02x}" for b in content[:16])  # 限制前16字节
+            clen = rule.get("content_depth", len(content))
+            code.append(f"    // Payload content check (depth={clen})")
+            code.append("    void *payload = (void *)iph + (iph->ihl * 4) + sizeof(struct tcphdr);")
+            code.append("    if (!check_bound(payload, data_end, %d)) return 0;" % clen)
+            code.append(f"    unsigned char pattern[{clen}] = {{{hexdata}}};")
+            code.append(f"    unsigned char buf[{clen}];")
+            code.append(f"    bpf_probe_read(buf, {clen}, payload);")
+            code.append("    for (int i=0; i<%d; i++) {" % clen)
+            code.append("        if (buf[i] != pattern[i]) return 0;")
+            code.append("    }")
 
-    // 修改主函数使用Map匹配
-    int ids_filter(struct __sk_buff *skb) {
-        struct packet_event evt = {};
+        # 命中规则计数
+        code.append(f"    __u32 key = {sid};")
+        code.append("    __u64 *cnt = bpf_map_lookup_elem(&rule_stats, &key);")
+        code.append("    if (cnt) (*cnt)++; else { __u64 init=1; bpf_map_update_elem(&rule_stats, &key, &init, BPF_ANY); }")
 
-        if (parse_packet(skb, &evt) < 0) {
-            return 0;
-        }
+        code.append("    return 1;")
+        code.append("}\n")
+        return "\n".join(code)
 
-        // 使用Map进行规则匹配
-        int matched_sid = match_rules_with_map(&evt);
-        if (matched_sid > 0) {
-            evt.sid = matched_sid;
-            events.perf_submit(skb, &evt, sizeof(evt));
-        }
+    def compile_rules_inline(self, rules):
+        """生成完整的 per-rule eBPF 内联检测程序"""
+        funcs = [self.header]
+        for rule in rules:
+            funcs.append(self._generate_rule_func(rule))
 
-        return 0;
-    }
-    """
+        # 主调度函数
+        funcs.append("""
+int ids_filter(struct __sk_buff *skb) {
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+    struct ethhdr *eth = data;
+    if (!check_bound(eth, data_end, sizeof(*eth))) return 0;
+    if (bpf_ntohs(eth->h_proto) != ETH_P_IP) return 0;
 
-    def _generate_helper_functions(self):
-        """生成用户空间加载规则所需的辅助函数"""
-        return """
-    // 用户空间加载规则的辅助函数
-    static inline void load_rule_to_map(__u32 protocol, __u16 src_port, __u16 dst_port, 
-                                       __u32 sid, __u32 action, __u32 priority) {
-        struct rule_key key = {
-            .protocol = protocol,
-            .src_port = src_port,
-            .dst_port = dst_port,
-            .src_ip_mask = 0xFFFFFFFF,
-            .dst_ip_mask = 0xFFFFFFFF
-        };
+    struct iphdr *iph = data + sizeof(*eth);
+    if (!check_bound(iph, data_end, sizeof(*iph))) return 0;
 
-        struct rule_value value = {
-            .sid = sid,
-            .action = action,
-            .priority = priority,
-            .content_len = 0
-        };
+""")
+        for rule in rules:
+            sid = rule["sid"]
+            funcs.append(f"    if (check_rule_{sid}(iph, data_end, data)) {{")
+            funcs.append(f"        // 命中规则 {sid}")
+            funcs.append(f"        return 0;")
+            funcs.append("    }")
 
-        rules_map.update(&key, &value);
-    }
-    """
+        funcs.append("    return 0;\n}\n")
+
+        return "\n".join(funcs)

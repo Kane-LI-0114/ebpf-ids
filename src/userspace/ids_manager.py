@@ -16,7 +16,7 @@ import array
 from bcc import BPF
 from datetime import datetime
 
-from dynamic_rule_loader import DynamicRuleLoader
+from rule_loader import RuleCompiler
 
 
 def get_active_interface():
@@ -352,7 +352,6 @@ class IDSManager:
         self.rule_manager = RuleManager(rules_dir)
         self.event_handler = None
         self.running = False  # 添加运行标志
-        self.rule_loader = None  # 新增
 
     def load_ebpf_program(self):
         """加载eBPF程序 - 支持动态编译和回退"""
@@ -367,31 +366,33 @@ class IDSManager:
         return self._load_static_ebpf()
 
     def _load_dynamic_ebpf(self):
-        """动态编译规则为eBPF程序"""
+        """动态编译规则为 eBPF 程序"""
         try:
-            from rule_loader import RuleCompiler
+            print("正在动态编译规则为 eBPF 代码...")
 
-            print("正在动态编译规则为eBPF代码...")
-
-            # 获取所有规则
+            # 获取规则
             rules = self.rule_manager.get_rules()
+            if not rules:
+                print("⚠ 未找到任何规则，无法动态编译 eBPF")
+                return False
 
-            # 编译规则为eBPF代码
+            # 使用 RuleCompiler 生成更具体的 eBPF 代码
             compiler = RuleCompiler()
             ebpf_source = compiler.compile_rules(rules)
 
-            # 保存生成的代码用于调试
-            with open("/tmp/generated_ebpf.c", "w") as f:
+            # 保存到文件方便调试
+            gen_path = "/tmp/generated_ebpf.c"
+            with open(gen_path, "w") as f:
                 f.write(ebpf_source)
-            print("生成的eBPF代码已保存到 /tmp/generated_ebpf.c")
+            print(f"✓ 已生成动态 eBPF 代码到 {gen_path}")
 
-            print("编译动态eBPF程序...")
+            # 编译 eBPF 程序
             self.bpf = BPF(text=ebpf_source)
-            print("✓ 动态eBPF程序编译成功")
+            print("✓ 动态 eBPF 程序编译成功")
             return True
 
         except Exception as e:
-            print(f"动态编译失败: {e}")
+            print(f"✗ 动态编译失败: {e}")
             return False
 
     def _load_static_ebpf(self):
@@ -430,28 +431,6 @@ class IDSManager:
         except Exception as e:
             print(f"✗ 附加探针失败: {e}")
             return False
-
-    def load_rules_to_map(self):
-        """将规则加载到eBPF Map中"""
-        try:
-            print("正在加载规则到eBPF Map...")
-
-            # 检查 rules_map 是否存在
-            if "rules_map" not in self.bpf:
-                print("⚠  eBPF程序中没有rules_map，跳过规则加载")
-                return True
-
-            # 获取编译后的规则
-            rules = self.rule_manager.get_rules()
-
-            # 通过DynamicRuleLoader加载到Map
-            self.rule_loader.load_rules(rules)
-
-            print(f"✓ 成功加载规则到eBPF Map")
-            return True
-        except Exception as e:
-            print(f"✗ 加载规则到Map失败: {e}")
-            return False
     
     def initialize(self):
         """初始化 IDS 系统"""
@@ -465,18 +444,12 @@ class IDSManager:
         # 加载 eBPF 程序
         if not self.load_ebpf_program():
             return False
-
-        # 现在才初始化 rule_loader，因为此时 self.bpf 已存在
-        self.rule_loader = DynamicRuleLoader(self.bpf)
         
         # 创建事件处理器
         self.event_handler = EventHandler(self.rule_manager)
         
         # 附加探针
         if not self.attach_probes():
-            return False
-
-        if not self.load_rules_to_map():
             return False
         
         return True
