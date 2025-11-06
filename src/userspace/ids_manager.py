@@ -515,59 +515,108 @@ class IDSManager:
     def load_ebpf_program(self):
         print("正在动态生成并编译 eBPF 程序...")
         try:
+            # 1️⃣ 读取规则
             rules = self.rule_manager.get_rules()
+            if not rules:
+                print("⚠ 未找到任何规则文件，请检查 rules_dir 是否正确。")
+                return False
+
+            # 2️⃣ 动态生成 eBPF C 代码
             compiler = RuleCompiler()
             ebpf_source = compiler.compile_rules(rules)
-            with open("/tmp/generated_ebpf.c", "w") as f:
+
+            # 3️⃣ 写入临时文件以供调试
+            gen_path = "/tmp/generated_ebpf.c"
+            with open(gen_path, "w") as f:
                 f.write(ebpf_source)
-            # self.bpf = BPF(text=ebpf_source)
+            print(f"✓ 已生成 eBPF 源码: {gen_path}")
+
+            # 4️⃣ 自动查找 Linux 头文件路径
+            kernel_release = os.uname().release
+            include_path = f"/usr/src/linux-headers-{kernel_release}/tools/include"
+
+            # 5️⃣ 编译加载 eBPF
             self.bpf = BPF(
                 text=ebpf_source,
                 cflags=[
                     "-I/usr/include",
                     "-I/usr/include/bpf",
-                    "-I/usr/src/linux-headers-$(uname -r)/tools/include",
+                    f"-I{include_path}",
                 ],
             )
             print("✓ eBPF 编译成功")
             return True
+
         except Exception as e:
             print(f"✗ eBPF 编译失败: {e}")
             return False
 
     def attach_probes(self):
-        func = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
-        self.bpf.attach_raw_socket(func, self.interface)
-        print(f"✓ 已附加到接口: {self.interface}")
-        return True
+        try:
+            func = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
+            self.bpf.attach_raw_socket(func, self.interface)
+            print(f"✓ 已附加到接口: {self.interface}")
+            return True
+        except Exception as e:
+            print(f"✗ 附加探针失败: {e}")
+            return False
 
     def initialize(self):
-        print(f"初始化 IDS ...")
+        print("初始化 IDS ...")
+
+        # 加载规则
         self.rule_manager.load_rules()
+
+        # 加载动态 eBPF
         if not self.load_ebpf_program():
             return False
+
+        # 填充规则映射（如果 RuleCompiler 生成了 rules_map）
+        if "rules_map" in self.bpf:
+            rules_map = self.bpf.get_table("rules_map")
+            rules = self.rule_manager.get_rules()
+            print(f"填充 {len(rules)} 条规则到 eBPF 映射...")
+
+            for i, rule in enumerate(rules[:1024]):
+                try:
+                    rule_struct = rules_map.Leaf()
+                    rule_struct.protocol = rule.get("protocol", 0)
+                    rule_struct.dport = rule.get("dport", 0)
+                    rule_struct.sport = rule.get("sport", 0)
+                    rule_struct.sid = rule.get("sid", 0)
+                    rules_map[i] = rule_struct
+                except Exception as e:
+                    print(f"⚠ 填充规则 {i} 失败: {e}")
+
+        # 注册事件处理器
         self.event_handler = EventHandler(self.rule_manager)
+
+        # 附加探针
         return self.attach_probes()
 
     def start(self):
         if not self.initialize():
             print("初始化失败")
             return
+
         print("✓ IDS 启动成功，开始监控流量...")
         self.bpf["events"].open_perf_buffer(self.event_handler.handle_event)
         self.running = True
+
         while self.running:
             try:
                 self.bpf.perf_buffer_poll(timeout=1000)
             except KeyboardInterrupt:
                 break
+
         self.stop()
 
     def stop(self):
         print("正在停止 IDS ...")
         self.running = False
-        stats = self.event_handler.get_statistics()
-        print(f"总事件: {stats['total_events']}, 告警: {stats['total_alerts']}")
+        if self.event_handler:
+            stats = self.event_handler.get_statistics()
+            print(f"总事件: {stats['total_events']}, 告警: {stats['total_alerts']}")
 
 
 def main():
