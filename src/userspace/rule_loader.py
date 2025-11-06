@@ -316,124 +316,6 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
     return bpf_skb_load_bytes(skb, off, out, 1);
 }
 """
-
-    def _gen_rule_check_with_skb(self, rule, base_idx=0):
-        """
-        为单条规则生成 socket-filter 风格的检测代码（使用 bpf_skb_load_bytes）
-        返回字符串（代码片段）
-        """
-        sid = rule.get("sid", 0)
-        proto = int(rule.get("protocol", 0) or 0)
-        ptype, pval1, pval2 = rule.get("dst_port", (0, 0, 0))
-        content = rule.get("content", b"") or b""
-        clen = len(content)
-
-        lines = []
-        lines.append(f"    /* rule {sid} start */")
-
-        # 1) 读取 IP 协议字段（以太头 14 bytes，IP 协议在 offset 23：14 + 9）
-        #    ip header: at offset 14..; ip->protocol is at eth + 9 (relative to IP start),
-        #    but easiest: load IP proto at offset 23 (14 + 9). ip header length (ihl) at 14 + 0 (first byte low nibble).
-        lines.append("    {")
-        lines.append("        unsigned char tmp = 0;")
-        # load first byte of IP header to get ihl (offset 14)
-        lines.append("        if (bpf_skb_load_bytes(skb, 14, &tmp, 1) < 0) goto __next_rule_%d;" % sid)
-        # ihl in low 4 bits *4 gives header length
-        lines.append("        unsigned int ihl = (tmp & 0x0f) * 4;")
-        # load protocol byte at offset 14 + 9
-        lines.append("        if (bpf_skb_load_bytes(skb, 14 + 9, &tmp, 1) < 0) goto __next_rule_%d;" % sid)
-        if proto != 0:
-            lines.append(f"        if (tmp != {proto}) goto __next_rule_{sid};")
-        # compute l4 offset
-        lines.append("        unsigned int l4_off = 14 + ihl;")
-
-        # 2) 如果需要检查端口，读取 tcp/udp dest port (2 bytes)
-        if ptype != 0:
-            # need ensure enough bytes for port (2 bytes)
-            # read 2 bytes into two tmp bytes
-            lines.append("        unsigned char p0=0, p1=0;")
-            # read first byte of dest port (offset l4_off + 2) (for TCP header: source(0-1), dest(2-3))
-            lines.append("        if (bpf_skb_load_bytes(skb, l4_off + 2, &p0, 1) < 0) goto __next_rule_%d;" % sid)
-            lines.append("        if (bpf_skb_load_bytes(skb, l4_off + 3, &p1, 1) < 0) goto __next_rule_%d;" % sid)
-            # combine
-            lines.append("        unsigned short dst_port = (p0 << 8) | p1;")
-            if ptype == 1:
-                lines.append(f"        if (dst_port != {pval1}) goto __next_rule_{sid};")
-            elif ptype == 2:
-                lines.append(f"        if (!(dst_port >= {pval1} && dst_port <= {pval2})) goto __next_rule_{sid};")
-
-        # 3) payload/content check - 逐字节读取并比较
-        if clen > 0:
-            # compute payload start: l4_off + header_len (for TCP we need data offset)
-            # But we don't know TCP doff here easily without reading tcp header first.
-            # For simplicity, assume minimal L4 header length: for TCP read data offset (doff) from tcp header first byte at l4_off + 12 (offset 12 -> data offset/flags)
-            lines.append("        // content compare (逐字节读取并比较)")
-            # try read first byte of L4 header to detect TCP data offset if proto==6
-            if proto == 6:
-                # read tcp data offset byte (tcp->doff is high 4 bits of offset at offset 12)
-                lines.append("        unsigned char tcp_hl = 0;")
-                lines.append("        if (bpf_skb_load_bytes(skb, l4_off + 12, &tcp_hl, 1) < 0) goto __next_rule_%d;" % sid)
-                lines.append("        unsigned int tcp_hdr_len = (tcp_hl >> 4) * 4;")
-                lines.append("        unsigned int payload_off = l4_off + tcp_hdr_len;")
-            else:
-                # UDP header is fixed 8 bytes
-                if proto == 17:
-                    lines.append("        unsigned int payload_off = l4_off + 8;")
-                else:
-                    # for other protocols, assume payload starts immediately after IP header
-                    lines.append("        unsigned int payload_off = l4_off;")
-
-            # now compare content bytes one by one
-            lines.append(f"        unsigned char btmp = 0;")
-            for i, b in enumerate(content[:16]):  # limit to first 16 bytes (safety)
-                lines.append("        if (bpf_skb_load_bytes(skb, payload_off + %d, &btmp, 1) < 0) goto __next_rule_%d;" % (i, sid))
-                lines.append(f"        if (btmp != 0x{b:02x}) goto __next_rule_{sid};")
-
-        # 4) 命中：提交 event（使用 events.perf_submit 的 BCC 接口）
-        # Note: BCC 的 events.perf_submit 需要 skb 和指针，使用 bpf_trace_printk 或 events.perf_submit 来输出
-        lines.append("        // rule matched -> update stats and emit event")
-        lines.append(f"        {{ __u32 _k = {sid}; __u64 *_c = rule_stats.lookup(&_k); if (_c) (*_c)++; else {{ __u64 _i=1; rule_stats.update(&_k, &_i); }} }}")
-        # build minimal event and submit (we'll read ip src/dst and ports similarly)
-        # read src ip (offset 14 + 12..15)
-        lines.append("        unsigned char ipb0=0, ipb1=0, ipb2=0, ipb3=0;")
-        lines.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 0, &ipb0, 1) < 0) goto __next_rule_%d;" % sid)
-        lines.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 1, &ipb1, 1) < 0) goto __next_rule_%d;" % sid)
-        lines.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 2, &ipb2, 1) < 0) goto __next_rule_%d;" % sid)
-        lines.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 3, &ipb3, 1) < 0) goto __next_rule_%d;" % sid)
-        lines.append("        __u32 src_ip = (ipb0) | (ipb1 << 8) | (ipb2 << 16) | (ipb3 << 24);")
-        # dst ip
-        lines.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 0, &ipb0, 1) < 0) goto __next_rule_%d;" % sid)
-        lines.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 1, &ipb1, 1) < 0) goto __next_rule_%d;" % sid)
-        lines.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 2, &ipb2, 1) < 0) goto __next_rule_%d;" % sid)
-        lines.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 3, &ipb3, 1) < 0) goto __next_rule_%d;" % sid)
-        lines.append("        __u32 dst_ip = (ipb0) | (ipb1 << 8) | (ipb2 << 16) | (ipb3 << 24);")
-
-        # ports: try fill src/dst if read earlier
-        if ptype != 0:
-            lines.append("        unsigned short src_port = 0;")
-            lines.append("        unsigned char sp0=0, sp1=0;")
-            lines.append("        if (bpf_skb_load_bytes(skb, l4_off + 0, &sp0, 1) >= 0 && bpf_skb_load_bytes(skb, l4_off + 1, &sp1, 1) >= 0) {")
-            lines.append("            src_port = (sp0 << 8) | sp1;")
-            lines.append("        }")
-            lines.append("        unsigned short dst_port_out = dst_port;")
-        else:
-            lines.append("        unsigned short src_port = 0;")
-            lines.append("        unsigned short dst_port_out = 0;")
-
-        # Prepare event struct on stack (small) and submit
-        lines.append("        struct packet_event evt = {0};")
-        lines.append("        evt.src_ip = src_ip; evt.dst_ip = dst_ip; evt.src_port = src_port; evt.dst_port = dst_port_out; evt.protocol = tmp; evt.sid = %d;" % sid)
-        # BCC 的 events.perf_submit 接口 in-kernel usage: events.perf_submit(skb, &evt, sizeof(evt));
-        lines.append("        events.perf_submit(skb, &evt, sizeof(evt));")
-        lines.append("        goto __rule_done_%d;" % sid)
-
-        # labels for normal path
-        lines.append("__next_rule_%d: ;" % sid)
-        lines.append("__rule_done_%d: ;" % sid)
-        lines.append("    }  /* end of rule block */")
-        lines.append("    /* rule %d end */" % sid)
-        return "\n".join(lines)
-
     def compile_rules_inline(self, rules, max_content_depth=8, max_inline_rules=10):
         """
         生成 BCC socket-filter 风格的 eBPF 源码（更保守、安全）：
@@ -570,7 +452,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
         print(f"正在动态生成并编译 eBPF 程序 ({len(rules)} 条规则)...")
         try:
             # 可根据需要调整阈值
-            return self.compile_rules_inline(rules, max_content_depth=8, max_inline_rules=10)
+            return self.compile_rules_inline(rules, max_content_depth=8, max_inline_rules=20)
         except Exception as e:
             print(f"✗ eBPF 编译失败: {e}")
             raise
