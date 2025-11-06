@@ -522,7 +522,7 @@ class IDSManager:
                 f.write(ebpf_source)
             # self.bpf = BPF(text=ebpf_source)
             self.bpf = BPF(
-                text=bpf_program,
+                text=ebpf_source,
                 cflags=[
                     "-I/usr/include",
                     "-I/usr/include/bpf",
