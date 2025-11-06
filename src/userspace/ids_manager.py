@@ -436,13 +436,18 @@ class IDSManager:
         try:
             print("正在加载规则到eBPF Map...")
 
+            # 检查 rules_map 是否存在
+            if "rules_map" not in self.bpf:
+                print("⚠  eBPF程序中没有rules_map，跳过规则加载")
+                return True
+
             # 获取编译后的规则
             rules = self.rule_manager.get_rules()
 
             # 通过DynamicRuleLoader加载到Map
             self.rule_loader.load_rules(rules)
 
-            print(f"✓ 成功加载 {len(rules)} 条规则到eBPF Map")
+            print(f"✓ 成功加载规则到eBPF Map")
             return True
         except Exception as e:
             print(f"✗ 加载规则到Map失败: {e}")

@@ -286,32 +286,29 @@ class RuleParser:
 
 
 class RuleCompiler:
-    """规则编译器 - 使用与硬编码版本相同的结构"""
-
     def __init__(self):
-        # 定义规则数据结构
         self.ebpf_template = """
         #include <uapi/linux/if_ether.h>
         #include <uapi/linux/ip.h>
         #include <uapi/linux/tcp.h>
         #include <uapi/linux/udp.h>
         #include <uapi/linux/icmp.h>
-
+        
         // 规则键值结构
         struct rule_key {
             __u32 protocol;
             __u16 src_port;
             __u16 dst_port;
-            __u32 src_ip_mask;    // 用于IP匹配
+            __u32 src_ip_mask;
             __u32 dst_ip_mask;
         };
-
+        
         struct rule_value {
             __u32 sid;
-            __u32 action;         // 1=alert, 2=block, etc.
+            __u32 action;
             __u32 priority;
-            __u8 content[32];     // 内容模式
-            __u8 content_len;     // 内容长度
+            __u8 content[32];
+            __u8 content_len;
         };
         
         // 定义事件数据结构
@@ -328,45 +325,40 @@ class RuleCompiler:
         
         // 事件输出Map
         BPF_PERF_OUTPUT(events);
-
+        
         // 定义规则Map
         BPF_HASH(rules_map, struct rule_key, struct rule_value, 1000);
-
+        
         // 统计Map
         BPF_HASH(rule_stats, __u32, __u64, 1000);
-
-        // 包解析函数 - 使用你原有的工作版本
+        
+        // 包解析函数
         static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) {
             __u32 proto;
-            __u32 nhoff = 14;  // ETH_HLEN
-
-            // 读取以太网协议类型
+            __u32 nhoff = 14;
+        
             bpf_skb_load_bytes(skb, 12, &proto, 2);
             proto = bpf_ntohs(proto);
-
-            // 检查是否为 IP 协议
-            if (proto != 0x0800)  // ETH_P_IP
+        
+            if (proto != 0x0800)
                 return -1;
-
-            // 读取 IP 头部信息
+        
             struct iphdr ip;
             bpf_skb_load_bytes(skb, nhoff, &ip, sizeof(ip));
-
-            // 填充基本 IP 信息
+        
             evt->src_ip = ip.saddr;
             evt->dst_ip = ip.daddr;
             evt->protocol = ip.protocol;
-            evt->sid = 0;  // 初始化为0
-
+            evt->sid = 0;
+        
             __u32 l4_offset = nhoff + (ip.ihl * 4);
-
-            // 根据协议类型解析传输层
-            if (ip.protocol == 6) {  // TCP
+        
+            if (ip.protocol == 6) {
                 struct tcphdr tcp;
                 bpf_skb_load_bytes(skb, l4_offset, &tcp, sizeof(tcp));
                 evt->src_port = bpf_ntohs(tcp.source);
                 evt->dst_port = bpf_ntohs(tcp.dest);
-            } else if (ip.protocol == 17) {  // UDP
+            } else if (ip.protocol == 17) {
                 struct udphdr udp;
                 bpf_skb_load_bytes(skb, l4_offset, &udp, sizeof(udp));
                 evt->src_port = bpf_ntohs(udp.source);
@@ -375,40 +367,72 @@ class RuleCompiler:
                 evt->src_port = 0;
                 evt->dst_port = 0;
             }
-
+        
             return 0;
         }
-
-        // 规则匹配函数 - 我们将修改这个部分
-        static inline int match_rules(struct packet_event *evt) {
-            // 原有的硬编码检测逻辑
-            if (evt->protocol == 1) {  // ICMP
-                return 1000;  // 返回测试SID
+        
+        // 通用的规则匹配函数
+        static inline int match_rules_with_map(struct packet_event *evt) {
+            struct rule_key key = {
+                .protocol = evt->protocol,
+                .src_port = evt->src_port,
+                .dst_port = evt->dst_port,
+                .src_ip_mask = 0xFFFFFFFF,
+                .dst_ip_mask = 0xFFFFFFFF
+            };
+        
+            struct rule_value *rule = rules_map.lookup(&key);
+            if (rule) {
+                __u32 sid = rule->sid;
+                __u64 *count = rule_stats.lookup(&sid);
+                if (count) {
+                    (*count)++;
+                } else {
+                    __u64 init_count = 1;
+                    rule_stats.update(&sid, &init_count);
+                }
+                return sid;
             }
-
-            // 新添加的动态规则检查
-            %s
-
+        
             return 0;
         }
-
-        // 主钩子函数 - 修复版本
+        
+        // 主钩子函数
         int ids_filter(struct __sk_buff *skb) {
             struct packet_event evt = {};
-
-            // 解析数据包
+        
             if (parse_packet(skb, &evt) < 0) {
                 return 0;
             }
-
-            // 规则匹配并设置SID
-            int matched_sid = match_rules(&evt);
+        
+            int matched_sid = match_rules_with_map(&evt);
             if (matched_sid > 0) {
-                evt.sid = matched_sid;  // 关键：设置SID到事件结构
+                evt.sid = matched_sid;
                 events.perf_submit(skb, &evt, sizeof(evt));
             }
-
+        
             return 0;
+        }
+        
+        // 用户空间加载规则的辅助函数（如果需要的话）
+        static inline void load_rule_to_map(__u32 protocol, __u16 src_port, __u16 dst_port, 
+                                           __u32 sid, __u32 action, __u32 priority) {
+            struct rule_key key = {
+                .protocol = protocol,
+                .src_port = src_port,
+                .dst_port = dst_port,
+                .src_ip_mask = 0xFFFFFFFF,
+                .dst_ip_mask = 0xFFFFFFFF
+            };
+        
+            struct rule_value value = {
+                .sid = sid,
+                .action = action,
+                .priority = priority,
+                .content_len = 0
+            };
+        
+            rules_map.update(&key, &value);
         }
         """
 
@@ -443,16 +467,10 @@ class RuleCompiler:
         """生成基于Map的规则系统"""
         print("正在生成基于Map的规则系统...")
 
-        # 生成通用的规则匹配函数
-        match_function = self._generate_map_matcher()
-
-        # 生成规则加载辅助函数
-        helper_functions = self._generate_helper_functions()
-
-        complete_ebpf = self.ebpf_template % (match_function + helper_functions)
-
+        # 直接返回完整的 eBPF 模板
+        # 不需要插入任何条件链，因为现在使用 Map 匹配
         print("✓ 生成基于Map的规则系统完成")
-        return complete_ebpf
+        return self.ebpf_template
 
     def _generate_map_matcher(self):
         """生成通用的Map匹配函数"""
