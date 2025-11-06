@@ -296,26 +296,14 @@ class RuleCompiler:
 #include <uapi/linux/udp.h>
 #include <uapi/linux/icmp.h>
 #include <linux/in.h>
-#include <bpf/bpf_helpers.h>
 
-// ==== MAP 定义 ====
+// ==== BCC 风格定义 ====
 
-struct rule_stat_t {
-    __u64 count;
-};
+// 事件输出缓冲区（perf）
+BPF_PERF_OUTPUT(events);
 
-// 规则统计表
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1000);
-    __type(key, __u32);
-    __type(value, __u64);
-} rule_stats SEC(".maps");
-
-// 事件输出缓冲区
-struct {
-    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-} events SEC(".maps");
+// 规则统计表（哈希）
+BPF_HASH(rule_stats, __u32, __u64, 1000);
 
 // ==== 事件结构 ====
 struct packet_event {
@@ -419,7 +407,7 @@ int ids_filter(struct __sk_buff *skb) {
             funcs.append(f"        evt.dst_ip = iph->daddr;")
             funcs.append(f"        evt.protocol = iph->protocol;")
             funcs.append(f"        evt.sid = {sid};")
-            funcs.append(f"        bpf_perf_event_output(skb, &events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));")
+            funcs.append(f"        events.perf_submit(skb, &evt, sizeof(evt));")
             funcs.append(f"        return 0;")
             funcs.append("    }")
 
