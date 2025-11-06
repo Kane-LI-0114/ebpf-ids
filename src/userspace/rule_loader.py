@@ -570,7 +570,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
         print(f"正在动态生成并编译 eBPF 程序 ({len(rules)} 条规则)...")
         try:
             # 可根据需要调整阈值
-            return self.compile_rules_inline(rules, max_content_depth=8, max_inline_rules=200)
+            return self.compile_rules_inline(rules, max_content_depth=8, max_inline_rules=10)
         except Exception as e:
             print(f"✗ eBPF 编译失败: {e}")
             raise
