@@ -338,169 +338,228 @@ class EventHandler:
         }
 
 
+# class IDSManager:
+#     """IDS 主管理类"""
+#
+#     def __init__(self, rules_dir, interface=None):
+#         self.rules_dir = rules_dir
+#         # 如果没有指定接口，自动检测
+#         if interface is None:
+#             self.interface = get_active_interface()
+#         else:
+#             self.interface = interface
+#         self.bpf = None
+#         self.rule_manager = RuleManager(rules_dir)
+#         self.event_handler = None
+#         self.running = False  # 添加运行标志
+#
+#     def load_ebpf_program(self):
+#         """加载eBPF程序 - 支持动态编译和回退"""
+#
+#         # 先尝试动态编译
+#         if self._load_dynamic_ebpf():
+#             print("✓ 使用动态编译的eBPF程序")
+#             return True
+#
+#         # 回退到原有的硬编码eBPF
+#         print("动态编译失败，回退到硬编码eBPF程序")
+#         return self._load_static_ebpf()
+#
+#     def _load_dynamic_ebpf(self):
+#         """动态编译规则为 eBPF 程序"""
+#         try:
+#             print("正在动态编译规则为 eBPF 代码...")
+#
+#             # 获取规则
+#             rules = self.rule_manager.get_rules()
+#             if not rules:
+#                 print("⚠ 未找到任何规则，无法动态编译 eBPF")
+#                 return False
+#
+#             # 使用 RuleCompiler 生成更具体的 eBPF 代码
+#             compiler = RuleCompiler()
+#             ebpf_source = compiler.compile_rules(rules)
+#
+#             # 保存到文件方便调试
+#             gen_path = "/tmp/generated_ebpf.c"
+#             with open(gen_path, "w") as f:
+#                 f.write(ebpf_source)
+#             print(f"✓ 已生成动态 eBPF 代码到 {gen_path}")
+#
+#             # 编译 eBPF 程序
+#             self.bpf = BPF(text=ebpf_source)
+#             print("✓ 动态 eBPF 程序编译成功")
+#             return True
+#
+#         except Exception as e:
+#             print(f"✗ 动态编译失败: {e}")
+#             return False
+#
+#     def _load_static_ebpf(self):
+#         """加载原有的硬编码eBPF程序"""
+#         kernel_code_path = os.path.join(
+#             os.path.dirname(os.path.dirname(__file__)),
+#             "kernel",
+#             "ids_ebpf.c"
+#         )
+#
+#         try:
+#             print(f"正在加载硬编码eBPF程序: {kernel_code_path}")
+#             with open(kernel_code_path, 'r') as f:
+#                 kernel_code = f.read()
+#
+#             print("编译硬编码eBPF程序...")
+#             self.bpf = BPF(text=kernel_code)
+#             print("✓ 硬编码eBPF程序编译成功")
+#             return True
+#
+#         except Exception as e:
+#             print(f"✗ 加载eBPF程序失败: {e}")
+#             return False
+#
+#     def attach_probes(self):
+#         """附加探针到网络接口"""
+#         try:
+#             print(f"附加eBPF程序到网络接口: {self.interface}")
+#
+#             # 使用socket filter（与硬编码版本保持一致）
+#             function_ids_filter = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
+#             self.bpf.attach_raw_socket(function_ids_filter, self.interface)
+#             print(f"✓ 已附加到 {self.interface}")
+#             return True
+#
+#         except Exception as e:
+#             print(f"✗ 附加探针失败: {e}")
+#             return False
+#
+#     def initialize(self):
+#         """初始化 IDS 系统"""
+#         print(f"初始化 eBPF IDS 系统...")
+#         print(f"规则目录: {self.rules_dir}")
+#         print(f"网络接口: {self.interface}")
+#
+#         # 加载规则
+#         self.rule_manager.load_rules()
+#
+#         # 加载 eBPF 程序
+#         if not self.load_ebpf_program():
+#             return False
+#
+#         # 创建事件处理器
+#         self.event_handler = EventHandler(self.rule_manager)
+#
+#         # 附加探针
+#         if not self.attach_probes():
+#             return False
+#
+#         return True
+#
+#     def start(self):
+#         """启动 IDS 监控"""
+#         if not self.initialize():
+#             print("✗ IDS 初始化失败")
+#             return
+#
+#         print("=" * 60)
+#         print("✓ eBPF IDS 启动成功，开始监控网络流量...")
+#         print("=" * 60)
+#         print("按 Ctrl+C 停止监控\n")
+#
+#         # 打开 perf buffer 并设置回调
+#         self.bpf["events"].open_perf_buffer(self.event_handler.handle_event)
+#
+#         # 设置退出标志
+#         self.running = True
+#
+#         # 事件轮询循环
+#         try:
+#             while self.running:
+#                 try:
+#                     self.bpf.perf_buffer_poll(timeout=1000)  # 1秒超时
+#                 except KeyboardInterrupt:
+#                     print("\n" + "=" * 60)
+#                     print("接收到中断信号，正在停止...")
+#                     break
+#                 except Exception as e:
+#                     # 忽略其他错误，继续运行
+#                     continue
+#
+#         except Exception as e:
+#             print(f"监控循环错误: {e}")
+#
+#         self.stop()
+#
+#     def stop(self):
+#         """停止 IDS"""
+#         print("\n正在停止 IDS...")
+#         self.running = False
+#
+#         if self.event_handler:
+#             stats = self.event_handler.get_statistics()
+#             print(f"\n最终统计:")
+#             print(f"  总事件数: {stats['total_events']}")
+#             print(f"  告警次数: {stats['total_alerts']}")
+#
+#         print("IDS 已停止")
+
+
 class IDSManager:
-    """IDS 主管理类"""
-    
     def __init__(self, rules_dir, interface=None):
         self.rules_dir = rules_dir
-        # 如果没有指定接口，自动检测
-        if interface is None:
-            self.interface = get_active_interface()
-        else:
-            self.interface = interface
+        self.interface = interface or get_active_interface()
         self.bpf = None
         self.rule_manager = RuleManager(rules_dir)
         self.event_handler = None
-        self.running = False  # 添加运行标志
+        self.running = False
 
     def load_ebpf_program(self):
-        """加载eBPF程序 - 支持动态编译和回退"""
-
-        # 先尝试动态编译
-        if self._load_dynamic_ebpf():
-            print("✓ 使用动态编译的eBPF程序")
-            return True
-
-        # 回退到原有的硬编码eBPF
-        print("动态编译失败，回退到硬编码eBPF程序")
-        return self._load_static_ebpf()
-
-    def _load_dynamic_ebpf(self):
-        """动态编译规则为 eBPF 程序"""
+        print("正在动态生成并编译 eBPF 程序...")
         try:
-            print("正在动态编译规则为 eBPF 代码...")
-
-            # 获取规则
             rules = self.rule_manager.get_rules()
-            if not rules:
-                print("⚠ 未找到任何规则，无法动态编译 eBPF")
-                return False
-
-            # 使用 RuleCompiler 生成更具体的 eBPF 代码
             compiler = RuleCompiler()
             ebpf_source = compiler.compile_rules(rules)
-
-            # 保存到文件方便调试
-            gen_path = "/tmp/generated_ebpf.c"
-            with open(gen_path, "w") as f:
+            with open("/tmp/generated_ebpf.c", "w") as f:
                 f.write(ebpf_source)
-            print(f"✓ 已生成动态 eBPF 代码到 {gen_path}")
-
-            # 编译 eBPF 程序
             self.bpf = BPF(text=ebpf_source)
-            print("✓ 动态 eBPF 程序编译成功")
+            print("✓ eBPF 编译成功")
             return True
-
         except Exception as e:
-            print(f"✗ 动态编译失败: {e}")
-            return False
-
-    def _load_static_ebpf(self):
-        """加载原有的硬编码eBPF程序"""
-        kernel_code_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "kernel",
-            "ids_ebpf.c"
-        )
-
-        try:
-            print(f"正在加载硬编码eBPF程序: {kernel_code_path}")
-            with open(kernel_code_path, 'r') as f:
-                kernel_code = f.read()
-
-            print("编译硬编码eBPF程序...")
-            self.bpf = BPF(text=kernel_code)
-            print("✓ 硬编码eBPF程序编译成功")
-            return True
-
-        except Exception as e:
-            print(f"✗ 加载eBPF程序失败: {e}")
+            print(f"✗ eBPF 编译失败: {e}")
             return False
 
     def attach_probes(self):
-        """附加探针到网络接口"""
-        try:
-            print(f"附加eBPF程序到网络接口: {self.interface}")
-
-            # 使用socket filter（与硬编码版本保持一致）
-            function_ids_filter = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
-            self.bpf.attach_raw_socket(function_ids_filter, self.interface)
-            print(f"✓ 已附加到 {self.interface}")
-            return True
-
-        except Exception as e:
-            print(f"✗ 附加探针失败: {e}")
-            return False
-    
-    def initialize(self):
-        """初始化 IDS 系统"""
-        print(f"初始化 eBPF IDS 系统...")
-        print(f"规则目录: {self.rules_dir}")
-        print(f"网络接口: {self.interface}")
-        
-        # 加载规则
-        self.rule_manager.load_rules()
-        
-        # 加载 eBPF 程序
-        if not self.load_ebpf_program():
-            return False
-        
-        # 创建事件处理器
-        self.event_handler = EventHandler(self.rule_manager)
-        
-        # 附加探针
-        if not self.attach_probes():
-            return False
-        
+        func = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
+        self.bpf.attach_raw_socket(func, self.interface)
+        print(f"✓ 已附加到接口: {self.interface}")
         return True
 
+    def initialize(self):
+        print(f"初始化 IDS ...")
+        self.rule_manager.load_rules()
+        if not self.load_ebpf_program():
+            return False
+        self.event_handler = EventHandler(self.rule_manager)
+        return self.attach_probes()
+
     def start(self):
-        """启动 IDS 监控"""
         if not self.initialize():
-            print("✗ IDS 初始化失败")
+            print("初始化失败")
             return
-
-        print("=" * 60)
-        print("✓ eBPF IDS 启动成功，开始监控网络流量...")
-        print("=" * 60)
-        print("按 Ctrl+C 停止监控\n")
-
-        # 打开 perf buffer 并设置回调
+        print("✓ IDS 启动成功，开始监控流量...")
         self.bpf["events"].open_perf_buffer(self.event_handler.handle_event)
-
-        # 设置退出标志
         self.running = True
-
-        # 事件轮询循环
-        try:
-            while self.running:
-                try:
-                    self.bpf.perf_buffer_poll(timeout=1000)  # 1秒超时
-                except KeyboardInterrupt:
-                    print("\n" + "=" * 60)
-                    print("接收到中断信号，正在停止...")
-                    break
-                except Exception as e:
-                    # 忽略其他错误，继续运行
-                    continue
-
-        except Exception as e:
-            print(f"监控循环错误: {e}")
-
+        while self.running:
+            try:
+                self.bpf.perf_buffer_poll(timeout=1000)
+            except KeyboardInterrupt:
+                break
         self.stop()
 
     def stop(self):
-        """停止 IDS"""
-        print("\n正在停止 IDS...")
+        print("正在停止 IDS ...")
         self.running = False
-
-        if self.event_handler:
-            stats = self.event_handler.get_statistics()
-            print(f"\n最终统计:")
-            print(f"  总事件数: {stats['total_events']}")
-            print(f"  告警次数: {stats['total_alerts']}")
-
-        print("IDS 已停止")
+        stats = self.event_handler.get_statistics()
+        print(f"总事件: {stats['total_events']}, 告警: {stats['total_alerts']}")
 
 
 def main():
