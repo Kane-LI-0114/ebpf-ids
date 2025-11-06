@@ -409,3 +409,14 @@ int ids_filter(struct __sk_buff *skb) {
         funcs.append("    return 0;\n}\n")
 
         return "\n".join(funcs)
+
+    def compile_rules(self, rules):
+        """
+        外部统一入口：编译规则并生成 eBPF 源代码
+        """
+        print(f"正在动态生成并编译 eBPF 程序 ({len(rules)} 条规则)...")
+        try:
+            return self.compile_rules_inline(rules)
+        except Exception as e:
+            print(f"✗ eBPF 编译失败: {e}")
+            raise
