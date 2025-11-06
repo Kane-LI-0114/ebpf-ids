@@ -376,46 +376,76 @@ static __always_inline bool check_bound(void *start, void *end, __u64 size) {
         code.append("}\n")
         return "\n".join(code)
 
-    def compile_rules_inline(self, rules):
-        funcs = [self.header]
+    def compile_rules_inline(self, rules, max_content_depth=8, max_inline_rules=100):
+        """
+        生成完整的 per-rule eBPF 内联检测程序（BCC 兼容版）
+        - 不使用 libbpf 的 SEC() / license，改用 BCC 风格
+        - max_content_depth / max_inline_rules 控制生成规模
+        """
+        inline_candidates = []
+        skipped_rules = []
 
-        # 逐条生成规则函数
+        # 选择可内联的规则：content 长度 <= max_content_depth 或 content 长度 == 0
         for rule in rules:
+            content = rule.get("content", b"") or b""
+            clen = len(content)
+            if clen == 0 or clen <= max_content_depth:
+                inline_candidates.append(rule)
+            else:
+                skipped_rules.append((rule.get("sid"), clen))
+
+        # 限制内联数量
+        if len(inline_candidates) > max_inline_rules:
+            extra = inline_candidates[max_inline_rules:]
+            inline_candidates = inline_candidates[:max_inline_rules]
+            for r in extra:
+                skipped_rules.append((r.get("sid"), len(r.get("content", b"") or b"")))
+
+        if skipped_rules:
+            print(f"⚠ 跳过 {len(skipped_rules)} 条过大或复杂的规则（仅将短规则内联）")
+            print("  被跳过的规则示例（SID, content_len）:", skipped_rules[:20])
+
+        # 生成头部（BCC 风格）
+        funcs = [self.header]  # 确保 header 是 BCC 风格（含 BPF_PERF_OUTPUT, BPF_HASH 等）
+
+        # 生成每个内联候选的检测函数（栈友好）
+        for rule in inline_candidates:
             funcs.append(self._generate_rule_func(rule))
 
-        # 主入口
-        funcs.append(r"""
-SEC("socket")
-int ids_filter(struct __sk_buff *skb) {
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-    struct ethhdr *eth = data;
-    if (!check_bound(eth, data_end, sizeof(*eth))) return 0;
-    if (bpf_ntohs(eth->h_proto) != ETH_P_IP) return 0;
+        # 生成主调度函数 ids_filter（BCC 需要普通函数，不使用 SEC("socket")）
+        funcs.append("""
+    int ids_filter(struct __sk_buff *skb) {
+        void *data = (void *)(long)skb->data;
+        void *data_end = (void *)(long)skb->data_end;
+        struct ethhdr *eth = data;
+        if (!check_bound(eth, data_end, sizeof(*eth))) return 0;
+        if (bpf_ntohs(eth->h_proto) != ETH_P_IP) return 0;
 
-    struct iphdr *iph = data + sizeof(*eth);
-    if (!check_bound(iph, data_end, sizeof(*iph))) return 0;
+        struct iphdr *iph = data + sizeof(*eth);
+        if (!check_bound(iph, data_end, sizeof(*iph))) return 0;
+    """)
 
-""")
-
-        # 调用每个规则函数
-        for rule in rules:
+        # 逐个调用内联函数，命中后通过 BCC 的 events.perf_submit 提交事件
+        for rule in inline_candidates:
             sid = rule["sid"]
             funcs.append(f"    if (check_rule_{sid}(iph, data_end, data)) {{")
-            funcs.append(f"        struct packet_event evt = {{}};")
+            funcs.append(f"        struct packet_event evt = {{0}};")
             funcs.append(f"        evt.src_ip = iph->saddr;")
             funcs.append(f"        evt.dst_ip = iph->daddr;")
             funcs.append(f"        evt.protocol = iph->protocol;")
             funcs.append(f"        evt.sid = {sid};")
-            funcs.append(f"        events.perf_submit(skb, &evt, sizeof(evt));")
+            funcs.append(f"        events.perf_submit(skb, &evt, sizeof(evt));")  # <-- BCC 风格
             funcs.append(f"        return 0;")
             funcs.append("    }")
 
         funcs.append("    return 0;\n}\n")
-        funcs.append('char _license[] SEC("license") = "GPL";\n')
+
+        # 不要生成 libbpf 的 license 行（BCC 下不需要 SEC("license")）
+        # funcs.append('char _license[] SEC("license") = "GPL";\n')
 
         return "\n".join(funcs)
 
+    
     def compile_rules(self, rules):
         print(f"正在动态生成并编译 eBPF 程序 ({len(rules)} 条规则)...")
         return self.compile_rules_inline(rules)
