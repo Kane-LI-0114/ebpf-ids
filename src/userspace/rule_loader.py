@@ -429,8 +429,8 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 
         # labels for normal path
         lines.append("__next_rule_%d: ;" % sid)
-        lines.append("    }")  # close block
         lines.append("__rule_done_%d: ;" % sid)
+        lines.append("    }  /* end of rule block */")
         lines.append("    /* rule %d end */" % sid)
         return "\n".join(lines)
 
