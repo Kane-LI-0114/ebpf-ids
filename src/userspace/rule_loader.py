@@ -436,13 +436,15 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 
     def compile_rules_inline(self, rules, max_content_depth=8, max_inline_rules=200):
         """
-        生成 BCC socket-filter 风格的 eBPF 源码
-        - max_content_depth: 单条规则最大允许的 content 长度（字节）
-        - max_inline_rules: 最多内联多少条规则
+        生成 BCC socket-filter 风格的 eBPF 源码（更保守、安全）：
+          - 不使用 label/goto，所有规则以 if-block 内联到 ids_filter 中
+          - 限制内联规则数量与 content 深度以避免 verifier 过大
+          - 使用 bpf_skb_load_bytes 逐字节读取，避免直接指针访问 skb->data
         """
         inline = []
         skipped = []
 
+        # 选择可以内联的规则（短 content 或无 content）
         for r in rules:
             c = r.get("content", b"") or b""
             if len(c) == 0 or len(c) <= max_content_depth:
@@ -450,6 +452,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
             else:
                 skipped.append((r.get("sid"), len(c)))
 
+        # 限制内联数量
         if len(inline) > max_inline_rules:
             extra = inline[max_inline_rules:]
             inline = inline[:max_inline_rules]
@@ -462,23 +465,104 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 
         parts = [self.header]
 
-        # 生成每条规则检查片段
-        for rule in inline:
-            parts.append(self._gen_rule_check_with_skb(rule))
-
-        # 生成主 ids_filter (socket filter)
+        # 现在生成 ids_filter，直接把每条规则的检查代码内联进去（用 if (...) { ... }）
         parts.append(r"""
-int ids_filter(struct __sk_buff *skb) {
-    // 我们用 bpf_skb_load_bytes 逐字节读取需要的头与 payload，避免直接指针访问 skb->data
-    // 若规则匹配，会通过 events.perf_submit 提交事件
-""")
-        # 调用每条内联规则片段：这些片段已经包含 goto 跳转和提交
-        for rule in inline:
-            sid = rule.get("sid", 0)
-            # 片段本身已经设定 goto 跳转与标签，所以这里只是占位（片段已被拼入）
-            # nothing additional required here
-            pass
+    int ids_filter(struct __sk_buff *skb) {
+        // 以太帧起始偏移
+        // 我们用 bpf_skb_load_bytes 逐字节读取 IP/TCP/UDP 字段，避免直接 data 指针访问
+        unsigned char tmp = 0;
+    """)
 
+        for rule in inline:
+            sid = int(rule.get("sid", 0) or 0)
+            proto = int(rule.get("protocol", 0) or 0)
+            ptype, pval1, pval2 = rule.get("dst_port", (0, 0, 0))
+            content = rule.get("content", b"") or b""
+            clen = min(len(content), max_content_depth)
+
+            # 开始一个独立的 if-block（不会使用 label/goto）
+            parts.append(f"    /* rule {sid} start */")
+            parts.append("    do {")
+            # 读取 IP 第一字节以获取 ihl
+            parts.append("        unsigned char b0 = 0;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14, &b0, 1) < 0) break;")
+            parts.append("        unsigned int ihl = (b0 & 0x0f) * 4;")
+            # 读取协议字节
+            parts.append("        unsigned char proto_b = 0;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 9, &proto_b, 1) < 0) break;")
+            if proto != 0:
+                parts.append(f"        if (proto_b != {proto}) break;")
+            # 计算 l4 偏移（以太头14）
+            parts.append("        unsigned int l4_off = 14 + ihl;")
+            # 端口检查（如果配置了）
+            if ptype != 0:
+                parts.append("        unsigned char p0=0, p1=0;")
+                parts.append("        if (bpf_skb_load_bytes(skb, l4_off + 2, &p0, 1) < 0) break;")
+                parts.append("        if (bpf_skb_load_bytes(skb, l4_off + 3, &p1, 1) < 0) break;")
+                parts.append("        unsigned short dst_port = (p0 << 8) | p1;")
+                if ptype == 1:
+                    parts.append(f"        if (dst_port != {pval1}) break;")
+                elif ptype == 2:
+                    parts.append(f"        if (!(dst_port >= {pval1} && dst_port <= {pval2})) break;")
+            else:
+                parts.append("        unsigned short dst_port = 0;")
+
+            # 内容比较（逐字节），注意对于 TCP 需要考虑 tcp header length，但我们限制 depth 很小
+            if clen > 0:
+                # 找 payload_off：若 TCP，读取 tcp data offset 字节
+                if proto == 6:
+                    parts.append("        unsigned char tcp_hl = 0;")
+                    parts.append("        if (bpf_skb_load_bytes(skb, l4_off + 12, &tcp_hl, 1) < 0) break;")
+                    parts.append("        unsigned int tcp_hdr_len = ((tcp_hl >> 4) & 0x0f) * 4;")
+                    parts.append("        unsigned int payload_off = l4_off + tcp_hdr_len;")
+                elif proto == 17:
+                    parts.append("        unsigned int payload_off = l4_off + 8;")
+                else:
+                    parts.append("        unsigned int payload_off = l4_off;")
+
+                parts.append("        unsigned char btmp = 0;")
+                # 只比较 content 的前 clen 字节（clen 已经 min 到 max_content_depth）
+                for i in range(clen):
+                    b = content[i]
+                    parts.append(f"        if (bpf_skb_load_bytes(skb, payload_off + {i}, &btmp, 1) < 0) break;")
+                    parts.append(f"        if (btmp != 0x{b:02x}) break;")
+
+            # 命中：更新统计并提交事件（读取 src/dst ip 与端口）
+            parts.append("        // rule matched -> update stats and emit event")
+            parts.append(
+                f"        {{ __u32 _k = {sid}; __u64 *_c = rule_stats.lookup(&_k); if (_c) (*_c)++; else {{ __u64 _i=1; rule_stats.update(&_k, &_i); }} }}")
+
+            # 读取 src/dst IP（字节方式）
+            parts.append("        unsigned char ip0=0, ip1=0, ip2=0, ip3=0;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 0, &ip0, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 1, &ip1, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 2, &ip2, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 3, &ip3, 1) < 0) break;")
+            parts.append("        __u32 src_ip = (ip0) | (ip1 << 8) | (ip2 << 16) | (ip3 << 24);")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 0, &ip0, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 1, &ip1, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 2, &ip2, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 3, &ip3, 1) < 0) break;")
+            parts.append("        __u32 dst_ip = (ip0) | (ip1 << 8) | (ip2 << 16) | (ip3 << 24);")
+
+            # src port
+            parts.append("        unsigned short src_port = 0;")
+            parts.append("        unsigned char sp0=0, sp1=0;")
+            parts.append(
+                "        if (bpf_skb_load_bytes(skb, l4_off + 0, &sp0, 1) >= 0 && bpf_skb_load_bytes(skb, l4_off + 1, &sp1, 1) >= 0) {")
+            parts.append("            src_port = (sp0 << 8) | sp1;")
+            parts.append("        }")
+
+            # 构造事件并提交
+            parts.append("        struct packet_event evt = {0};")
+            parts.append(
+                "        evt.src_ip = src_ip; evt.dst_ip = dst_ip; evt.src_port = src_port; evt.dst_port = dst_port; evt.protocol = proto_b; evt.sid = %d;" % sid)
+            parts.append("        events.perf_submit(skb, &evt, sizeof(evt));")
+            parts.append("        return 0;")
+            parts.append("    } while (0);")
+            parts.append("    /* rule %d end */" % sid)
+
+        # 结束 ids_filter
         parts.append("    return 0;\n}\n")
         return "\n".join(parts)
 
