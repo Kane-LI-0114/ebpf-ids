@@ -520,7 +520,15 @@ class IDSManager:
             ebpf_source = compiler.compile_rules(rules)
             with open("/tmp/generated_ebpf.c", "w") as f:
                 f.write(ebpf_source)
-            self.bpf = BPF(text=ebpf_source)
+            # self.bpf = BPF(text=ebpf_source)
+            self.bpf = BPF(
+                text=bpf_program,
+                cflags=[
+                    "-I/usr/include",
+                    "-I/usr/include/bpf",
+                    "-I/usr/src/linux-headers-$(uname -r)/tools/include",
+                ],
+            )
             print("✓ eBPF 编译成功")
             return True
         except Exception as e:
