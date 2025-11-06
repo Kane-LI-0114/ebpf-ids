@@ -290,11 +290,20 @@ class RuleCompiler:
     def __init__(self):
         # 通用头文件部分（保持不变）
         self.header = """
+#include <uapi/linux/bpf.h>
 #include <uapi/linux/if_ether.h>
 #include <uapi/linux/ip.h>
 #include <uapi/linux/tcp.h>
 #include <uapi/linux/udp.h>
 #include <uapi/linux/icmp.h>
+#include <linux/in.h>          // ✅ 补充 IPPROTO_TCP / UDP / ICMP 定义
+#include <linux/if_packet.h>
+#include <linux/if_vlan.h>
+#include <linux/if_ether.h>
+#include <linux/if_arp.h>
+#include <linux/if_ether.h>
+#include <linux/types.h>
+#include <bpf/bpf_helpers.h>
 
 struct packet_event {
     __u32 src_ip;
@@ -320,28 +329,36 @@ static __always_inline bool check_bound(void *start, void *end, __u64 size) {
         proto = rule["protocol"]
         proto_name = {6: "IPPROTO_TCP", 17: "IPPROTO_UDP", 1: "IPPROTO_ICMP"}.get(proto, "IPPROTO_IP")
 
-        code = [f"/* === Rule SID {sid}: {rule.get('msg','')} === */"]
+        code = [f"/* === Rule SID {sid}: {rule.get('msg', '')} === */"]
         code.append(f"static __always_inline int check_rule_{sid}(struct iphdr *iph, void *data_end, void *data) {{")
 
         # 协议匹配
         code.append(f"    if (iph->protocol != {proto_name}) return 0;")
 
-        # TCP 头解析
+        # TCP / UDP 头解析
         if proto == 6:
             code.append("    struct tcphdr *tcph = (void *)iph + (iph->ihl * 4);")
             code.append("    if (!check_bound(tcph, data_end, sizeof(*tcph))) return 0;")
+            payload_base = "(void *)tcph + (tcph->doff * 4)"
+            hdr_name = "tcph"
         elif proto == 17:
             code.append("    struct udphdr *udph = (void *)iph + (iph->ihl * 4);")
             code.append("    if (!check_bound(udph, data_end, sizeof(*udph))) return 0;")
+            payload_base = "(void *)udph + sizeof(*udph)"
+            hdr_name = "udph"
+        else:
+            payload_base = "(void *)iph + (iph->ihl * 4)"
+            hdr_name = "iph"
 
         # 端口匹配
         ptype, val1, val2 = rule.get("dst_port", (0, 0, 0))
         if ptype == 1:
-            code.append(f"    if (bpf_ntohs(tcph->dest) != {val1}) return 0;")
+            code.append(f"    if (bpf_ntohs({hdr_name}->dest) != {val1}) return 0;")
         elif ptype == 2:
-            code.append(f"    if (!(bpf_ntohs(tcph->dest) >= {val1} && bpf_ntohs(tcph->dest) <= {val2})) return 0;")
+            code.append(
+                f"    if (!(bpf_ntohs({hdr_name}->dest) >= {val1} && bpf_ntohs({hdr_name}->dest) <= {val2})) return 0;")
 
-        # flow 状态匹配
+        # flow 状态匹配（暂留 TODO）
         direction = rule.get("flow_direction", 0)
         state = rule.get("flow_state", 0)
         if direction or state:
@@ -359,26 +376,28 @@ static __always_inline bool check_bound(void *start, void *end, __u64 size) {
         # 内容匹配
         content = rule.get("content", b"")
         if content and len(content) > 0:
-            hexdata = ", ".join(f"0x{b:02x}" for b in content[:16])  # 限制前16字节
             clen = rule.get("content_depth", len(content))
+            hexdata = ", ".join(f"0x{b:02x}" for b in content[:clen])
             code.append(f"    // Payload content check (depth={clen})")
-            code.append("    void *payload = (void *)iph + (iph->ihl * 4) + sizeof(struct tcphdr);")
-            code.append("    if (!check_bound(payload, data_end, %d)) return 0;" % clen)
+            code.append(f"    void *payload = {payload_base};")
+            code.append(f"    if (!check_bound(payload, data_end, {clen})) return 0;")
             code.append(f"    unsigned char pattern[{clen}] = {{{hexdata}}};")
             code.append(f"    unsigned char buf[{clen}];")
             code.append(f"    bpf_probe_read(buf, {clen}, payload);")
-            code.append("    for (int i=0; i<%d; i++) {" % clen)
-            code.append("        if (buf[i] != pattern[i]) return 0;")
-            code.append("    }")
+            code.append(f"    for (int i=0; i<{clen}; i++) {{")
+            code.append(f"        if (buf[i] != pattern[i]) return 0;")
+            code.append(f"    }}")
 
         # 命中规则计数
         code.append(f"    __u32 key = {sid};")
         code.append("    __u64 *cnt = bpf_map_lookup_elem(&rule_stats, &key);")
-        code.append("    if (cnt) (*cnt)++; else { __u64 init=1; bpf_map_update_elem(&rule_stats, &key, &init, BPF_ANY); }")
+        code.append(
+            "    if (cnt) (*cnt)++; else { __u64 init=1; bpf_map_update_elem(&rule_stats, &key, &init, BPF_ANY); }")
 
         code.append("    return 1;")
         code.append("}\n")
         return "\n".join(code)
+
 
     def compile_rules_inline(self, rules):
         """生成完整的 per-rule eBPF 内联检测程序"""
