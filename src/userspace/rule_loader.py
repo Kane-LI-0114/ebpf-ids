@@ -289,32 +289,51 @@ class RuleCompiler:
     """规则编译器 - 使用与硬编码版本相同的结构"""
 
     def __init__(self):
-        # 直接使用你原有的完整eBPF代码作为基础
-        self.ebpf_base = """
+        # 定义规则数据结构
+        self.ebpf_template = """
         #include <uapi/linux/if_ether.h>
         #include <uapi/linux/ip.h>
         #include <uapi/linux/tcp.h>
         #include <uapi/linux/udp.h>
         #include <uapi/linux/icmp.h>
-        #include <uapi/linux/in.h>
-        #include <uapi/linux/pkt_cls.h>
 
-        // 定义事件数据结构 - 添加 sid 字段
+        // 规则键值结构
+        struct rule_key {
+            __u32 protocol;
+            __u16 src_port;
+            __u16 dst_port;
+            __u32 src_ip_mask;    // 用于IP匹配
+            __u32 dst_ip_mask;
+        };
+
+        struct rule_value {
+            __u32 sid;
+            __u32 action;         // 1=alert, 2=block, etc.
+            __u32 priority;
+            __u8 content[32];     // 内容模式
+            __u8 content_len;     // 内容长度
+        };
+        
+        // 定义事件数据结构
         struct packet_event {
             __u32 src_ip;
             __u32 dst_ip;
             __u16 src_port;
             __u16 dst_port;
             __u8 protocol;
-            __u32 sid;  // 添加这个字段！
+            __u32 sid;
             __u32 payload_len;
             __u8 payload[256];
         };
-
-        // eBPF Maps 定义
+        
+        // 事件输出Map
         BPF_PERF_OUTPUT(events);
-        BPF_HASH(rule_cache, __u32, __u32);
-        BPF_HASH(connection_state, __u64, __u32);
+
+        // 定义规则Map
+        BPF_HASH(rules_map, struct rule_key, struct rule_value, 1000);
+
+        // 统计Map
+        BPF_HASH(rule_stats, __u32, __u64, 1000);
 
         // 包解析函数 - 使用你原有的工作版本
         static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) {
@@ -421,53 +440,91 @@ class RuleCompiler:
             return f"    return {sid};"
 
     def compile_rules(self, rules):
-        """编译所有规则为eBPF代码 - 修复逻辑顺序"""
-        print("正在编译规则为eBPF代码...")
+        """生成基于Map的规则系统"""
+        print("正在生成基于Map的规则系统...")
 
-        # 将规则分类：具体规则 vs 通用规则
-        specific_rules = []  # 有具体端口条件的规则
-        generic_rules = []  # 只有协议条件的通用规则
+        # 生成通用的规则匹配函数
+        match_function = self._generate_map_matcher()
 
-        # test_rules = rules[:100]  # 你选择的100条规则
+        # 生成规则加载辅助函数
+        helper_functions = self._generate_helper_functions()
 
-        for rule in rules:
-            port_type, val1, val2 = rule.get('dst_port', (0, 0, 0))
-            protocol = rule.get('protocol', 0)
+        complete_ebpf = self.ebpf_template % (match_function + helper_functions)
 
-            # 有具体端口条件的规则
-            if port_type != 0 and protocol != 0:
-                specific_rules.append(rule)
-            # 只有协议条件的通用规则
-            elif protocol != 0:
-                generic_rules.append(rule)
-
-        print(f"选择 {len(specific_rules)} 条具体规则 + {len(generic_rules)} 条通用规则")
-
-        # 生成规则条件：具体规则在前，通用规则在后
-        rule_conditions = []
-
-        # 1. 先处理具体规则
-        for rule in specific_rules:
-            condition = self._generate_rule_condition(rule)
-            if condition:
-                rule_conditions.append(condition)
-
-        # 2. 再处理通用规则
-        for rule in generic_rules:
-            condition = self._generate_rule_condition(rule)
-            if condition:
-                rule_conditions.append(condition)
-
-        # 使用 else-if 链
-        else_if_chain = []
-        for i, condition in enumerate(rule_conditions):
-            if i == 0:
-                else_if_chain.append(condition)
-            else:
-                # 将 "if" 替换为 "else if"
-                else_if_chain.append(condition.replace("    if (", "    else if (", 1))
-
-        complete_ebpf = (self.ebpf_base % "\n".join(else_if_chain))
-
-        print(f"✓ 成功编译 {len(rule_conditions)} 条规则到eBPF（使用else-if链）")
+        print("✓ 生成基于Map的规则系统完成")
         return complete_ebpf
+
+    def _generate_map_matcher(self):
+        """生成通用的Map匹配函数"""
+        return """
+    // 通用的规则匹配函数
+    static inline int match_rules_with_map(struct packet_event *evt) {
+        struct rule_key key = {
+            .protocol = evt->protocol,
+            .src_port = evt->src_port,
+            .dst_port = evt->dst_port,
+            .src_ip_mask = 0xFFFFFFFF,  // 精确匹配
+            .dst_ip_mask = 0xFFFFFFFF
+        };
+
+        // 在Map中查找规则
+        struct rule_value *rule = rules_map.lookup(&key);
+        if (rule) {
+            // 更新统计
+            __u32 sid = rule->sid;
+            __u64 *count = rule_stats.lookup(&sid);
+            if (count) {
+                (*count)++;
+            } else {
+                __u64 init_count = 1;
+                rule_stats.update(&sid, &init_count);
+            }
+            return sid;
+        }
+
+        return 0;
+    }
+
+    // 修改主函数使用Map匹配
+    int ids_filter(struct __sk_buff *skb) {
+        struct packet_event evt = {};
+
+        if (parse_packet(skb, &evt) < 0) {
+            return 0;
+        }
+
+        // 使用Map进行规则匹配
+        int matched_sid = match_rules_with_map(&evt);
+        if (matched_sid > 0) {
+            evt.sid = matched_sid;
+            events.perf_submit(skb, &evt, sizeof(evt));
+        }
+
+        return 0;
+    }
+    """
+
+    def _generate_helper_functions(self):
+        """生成用户空间加载规则所需的辅助函数"""
+        return """
+    // 用户空间加载规则的辅助函数
+    static inline void load_rule_to_map(__u32 protocol, __u16 src_port, __u16 dst_port, 
+                                       __u32 sid, __u32 action, __u32 priority) {
+        struct rule_key key = {
+            .protocol = protocol,
+            .src_port = src_port,
+            .dst_port = dst_port,
+            .src_ip_mask = 0xFFFFFFFF,
+            .dst_ip_mask = 0xFFFFFFFF
+        };
+
+        struct rule_value value = {
+            .sid = sid,
+            .action = action,
+            .priority = priority,
+            .content_len = 0
+        };
+
+        rules_map.update(&key, &value);
+    }
+    """
