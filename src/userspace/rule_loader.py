@@ -324,24 +324,21 @@ static __always_inline bool check_bound(void *start, void *end, __u64 size) {
 
     def _generate_rule_func(self, rule):
         """
-        生成单条规则的检测函数（栈友好版）
+        栈友好版：生成单条规则的检测函数
         - 不在栈上分配大数组
-        - 用逐字节读取比较，且限制最大比较深度 MAX_DEPTH
+        - 使用逐字节 bpf_probe_read 比较
+        - 不使用 __attribute__((noinline))（兼容性问题）
         """
         sid = rule["sid"]
-        proto = rule["protocol"]
+        proto = rule.get("protocol", 0)
         proto_name = {6: "IPPROTO_TCP", 17: "IPPROTO_UDP", 1: "IPPROTO_ICMP"}.get(proto, "IPPROTO_IP")
 
-        # 限制每条规则进行的 payload 字节比较深度（避免生成过大代码/栈）
-        MAX_DEPTH = 8  # 可改为 16，但风险增加。先用 8 安全。
         content = rule.get("content", b"") or b""
-        content_len = min(len(content), MAX_DEPTH)
-        content_too_long = len(content) > MAX_DEPTH
+        content_len = len(content)
 
         code_lines = []
         code_lines.append(f"/* === Rule SID {sid}: {rule.get('msg', '')} === */")
-        # 不使用 __always_inline，改为 static inline（让编译器决定是否inline）
-        code_lines.append(f"static int __attribute__((noinline)) check_rule_{sid}(struct iphdr *iph, void *data_end, void *data) {{")
+        code_lines.append(f"static inline int check_rule_{sid}(struct iphdr *iph, void *data_end, void *data) {{")
 
         # 协议检查
         code_lines.append(f"    if (iph->protocol != {proto_name}) return 0;")
@@ -369,7 +366,7 @@ static __always_inline bool check_bound(void *start, void *end, __u64 size) {
             code_lines.append(
                 f"    if (!(bpf_ntohs({hdr_name}->dest) >= {val1} && bpf_ntohs({hdr_name}->dest) <= {val2})) return 0;")
 
-        # flow 注释（占位）
+        # flow 注释占位
         direction = rule.get("flow_direction", 0)
         state = rule.get("flow_state", 0)
         if direction or state:
@@ -384,21 +381,18 @@ static __always_inline bool check_bound(void *start, void *end, __u64 size) {
                 comment.append("stateless")
             code_lines.append(f"    // flow: {'/'.join(comment)} (TODO: conntrack)")
 
-        # payload 内容匹配（栈友好：逐字节读取比较；限制 MAX_DEPTH）
+        # payload 内容匹配（逐字节，栈友好）
         if content_len > 0:
-            code_lines.append(f"    // Payload content check (using max depth {MAX_DEPTH})")
+            # 这里不限制 content_len：调用处会提前筛选。假设 content_len 合理。
+            code_lines.append(f"    // Payload content check (checking first {content_len} bytes)")
             code_lines.append(f"    void *payload = {payload_base};")
             code_lines.append(f"    if (!check_bound(payload, data_end, {content_len})) return 0;")
             code_lines.append(f"    unsigned char tmp_byte = 0;")
-            # 逐字节生成 bpf_probe_read + 比较（避免在栈上开大数组）
             for i in range(content_len):
                 b = content[i]
+                # 逐字节读取并比较
                 code_lines.append(f"    if (bpf_probe_read(&tmp_byte, 1, payload + {i}) < 0) return 0;")
                 code_lines.append(f"    if (tmp_byte != 0x{b:02x}) return 0;")
-            if content_too_long:
-                # 如果 content 比 MAX_DEPTH 长，生成注释警告（可选）
-                code_lines.append(
-                    f"    // NOTE: original content length {len(content)} > {MAX_DEPTH}; only first {MAX_DEPTH} bytes checked")
 
         # 统计计数
         code_lines.append(f"    __u32 key = {sid};")
@@ -408,44 +402,77 @@ static __always_inline bool check_bound(void *start, void *end, __u64 size) {
 
         code_lines.append("    return 1;")
         code_lines.append("}\n")
-
         return "\n".join(code_lines)
 
+    def compile_rules_inline(self, rules, max_content_depth=8, max_inline_rules=400):
+        """
+        生成完整的 per-rule eBPF 内联检测程序（带过滤）
+        参数:
+          - max_content_depth: content 最大允许字节数（超过则跳过）
+          - max_inline_rules: 最多内联多少条规则到程序中（防止生成过大）
+        返回: 完整 eBPF C 源码字符串
+        """
+        inline_candidates = []
+        skipped_rules = []
 
-    def compile_rules_inline(self, rules):
-        """生成完整的 per-rule eBPF 内联检测程序"""
-        funcs = [self.header]
+        # 选择可内联的规则：content 长度 <= max_content_depth 或 content 长度 == 0
         for rule in rules:
+            content = rule.get("content", b"") or b""
+            clen = len(content)
+            # 只内联短content或没有content的规则
+            if clen == 0 or clen <= max_content_depth:
+                inline_candidates.append(rule)
+            else:
+                skipped_rules.append((rule.get("sid"), clen))
+
+        # 如果候选规则过多，只取前 max_inline_rules（按原始顺序）
+        if len(inline_candidates) > max_inline_rules:
+            extra = inline_candidates[max_inline_rules:]
+            inline_candidates = inline_candidates[:max_inline_rules]
+            for r in extra:
+                skipped_rules.append((r.get("sid"), len(r.get("content", b"") or b"")))
+
+        # 打印被跳过的规则摘要（前 20 个）
+        if skipped_rules:
+            print(f"⚠ 跳过 {len(skipped_rules)} 条过大或复杂的规则（仅将短规则内联）")
+            print("  被跳过的规则示例（SID, content_len）:", skipped_rules[:20])
+
+        # 生成头部与辅助函数
+        funcs = [self.header]
+
+        # 生成每个内联候选的检测函数（栈友好）
+        for rule in inline_candidates:
             funcs.append(self._generate_rule_func(rule))
 
-        # 生成主调度函数 ids_filter，调用各个 check_rule_xxx
+        # 生成主调度函数 ids_filter（仅调用 check_rule_xxx）
         funcs.append("""
-        int ids_filter(struct __sk_buff *skb) {
-            void *data = (void *)(long)skb->data;
-            void *data_end = (void *)(long)skb->data_end;
-            struct ethhdr *eth = data;
-            if (!check_bound(eth, data_end, sizeof(*eth))) return 0;
-            if (bpf_ntohs(eth->h_proto) != ETH_P_IP) return 0;
+int ids_filter(struct __sk_buff *skb) {
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+    struct ethhdr *eth = data;
+    if (!check_bound(eth, data_end, sizeof(*eth))) return 0;
+    if (bpf_ntohs(eth->h_proto) != ETH_P_IP) return 0;
 
-            struct iphdr *iph = data + sizeof(*eth);
-            if (!check_bound(iph, data_end, sizeof(*iph))) return 0;
-        """)
-        # 这里不在 ids_filter 内声明大数组等，只是逐个调用
-        for rule in rules:
+    struct iphdr *iph = data + sizeof(*eth);
+    if (!check_bound(iph, data_end, sizeof(*iph))) return 0;
+""")
+
+        # 逐个调用内联函数（函数本身较小，编译器可能会内联，但不会把所有逻辑拼到一个大块）
+        for rule in inline_candidates:
             sid = rule["sid"]
             funcs.append(f"    if (check_rule_{sid}(iph, data_end, data)) {{")
-            funcs.append(f"        // 命中规则 {sid} -> 触发事件上报")
             funcs.append(f"        struct packet_event evt = {{0}};")
             funcs.append(f"        evt.src_ip = iph->saddr;")
             funcs.append(f"        evt.dst_ip = iph->daddr;")
             funcs.append(f"        evt.protocol = iph->protocol;")
-            # 如果 TCP/UDP，需要把端口读入 evt（使用 bpf_probe_read or direct if safe）
+            funcs.append(f"        evt.sid = {sid};")
             funcs.append(f"        events.perf_submit(skb, &evt, sizeof(evt));")
             funcs.append(f"        return 0;")
             funcs.append("    }")
 
         funcs.append("    return 0;\n}\n")
 
+        # 返回最终代码
         return "\n".join(funcs)
 
     def compile_rules(self, rules):
