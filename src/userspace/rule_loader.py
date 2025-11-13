@@ -476,7 +476,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
         parts.append("    return 0;\n}\n")
         return "\n".join(parts)
 
-    def compile_rules(self, rules, filter_sids=None):
+    def compile_rules(self, rules, filter_sids=108):
         """
         编译规则为 eBPF 代码
         
