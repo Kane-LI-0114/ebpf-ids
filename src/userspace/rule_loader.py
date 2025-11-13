@@ -316,15 +316,43 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
     return bpf_skb_load_bytes(skb, off, out, 1);
 }
 """
-    def compile_rules_inline(self, rules, max_content_depth=8, max_inline_rules=10):
+    def compile_rules_inline(self, rules, max_content_depth=8, max_inline_rules=10, filter_sids=None):
         """
         生成 BCC socket-filter 风格的 eBPF 源码（更保守、安全）：
           - 不使用 label/goto，所有规则以 if-block 内联到 ids_filter 中
           - 限制内联规则数量与 content 深度以避免 verifier 过大
           - 使用 bpf_skb_load_bytes 逐字节读取，避免直接指针访问 skb->data
+        
+        参数:
+            rules: 规则列表
+            max_content_depth: 最大内容匹配深度
+            max_inline_rules: 最大内联规则数量
+            filter_sids: SID 过滤列表（可以是单个 int、list 或 None）
+                        - None: 加载所有规则（默认）
+                        - int: 只加载指定的单个规则
+                        - list: 只加载列表中指定的规则
         """
         inline = []
         skipped = []
+
+        # 处理 filter_sids 参数
+        if filter_sids is not None:
+            if isinstance(filter_sids, int):
+                filter_sids = [filter_sids]
+            elif not isinstance(filter_sids, (list, tuple, set)):
+                print("⚠ filter_sids 参数类型错误，应为 int/list/tuple/set，已忽略")
+                filter_sids = None
+            else:
+                filter_sids = set(filter_sids)  # 转为集合以提高查找效率
+        
+        # 如果指定了 SID 过滤，先进行过滤
+        if filter_sids is not None:
+            filtered_rules = [r for r in rules if r.get("sid") in filter_sids]
+            if len(filtered_rules) == 0:
+                print(f"⚠ 警告: 没有找到匹配的规则 (filter_sids={filter_sids})")
+            else:
+                print(f"✓ SID 过滤: {len(rules)} -> {len(filtered_rules)} 条规则 (SIDs: {sorted([r.get('sid') for r in filtered_rules])})")
+            rules = filtered_rules
 
         # 选择可以内联的规则（短 content 或无 content）
         for r in rules:
@@ -414,18 +442,18 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
             parts.append(
                 f"        {{ __u32 _k = {sid}; __u64 *_c = rule_stats.lookup(&_k); if (_c) (*_c)++; else {{ __u64 _i=1; rule_stats.update(&_k, &_i); }} }}")
 
-            # 读取 src/dst IP（字节方式）
+            # 读取 src/dst IP（字节方式，网络字节序 = 大端）
             parts.append("        unsigned char ip0=0, ip1=0, ip2=0, ip3=0;")
-            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 0, &ip0, 1) < 0) break;")
-            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 1, &ip1, 1) < 0) break;")
-            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 2, &ip2, 1) < 0) break;")
-            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 12 + 3, &ip3, 1) < 0) break;")
-            parts.append("        __u32 src_ip = (ip0) | (ip1 << 8) | (ip2 << 16) | (ip3 << 24);")
-            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 0, &ip0, 1) < 0) break;")
-            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 1, &ip1, 1) < 0) break;")
-            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 2, &ip2, 1) < 0) break;")
-            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 16 + 3, &ip3, 1) < 0) break;")
-            parts.append("        __u32 dst_ip = (ip0) | (ip1 << 8) | (ip2 << 16) | (ip3 << 24);")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 12, &ip0, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 13, &ip1, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 14, &ip2, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 15, &ip3, 1) < 0) break;")
+            parts.append("        __u32 src_ip = (ip0 << 24) | (ip1 << 16) | (ip2 << 8) | ip3;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 16, &ip0, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 17, &ip1, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 18, &ip2, 1) < 0) break;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14 + 19, &ip3, 1) < 0) break;")
+            parts.append("        __u32 dst_ip = (ip0 << 24) | (ip1 << 16) | (ip2 << 8) | ip3;")
 
             # src port
             parts.append("        unsigned short src_port = 0;")
@@ -448,11 +476,18 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
         parts.append("    return 0;\n}\n")
         return "\n".join(parts)
 
-    def compile_rules(self, rules):
+    def compile_rules(self, rules, filter_sids=None):
+        """
+        编译规则为 eBPF 代码
+        
+        参数:
+            rules: 规则列表
+            filter_sids: SID 过滤列表（可以是单个 int、list 或 None）
+        """
         print(f"正在动态生成并编译 eBPF 程序 ({len(rules)} 条规则)...")
         try:
             # 可根据需要调整阈值
-            return self.compile_rules_inline(rules, max_content_depth=8, max_inline_rules=20)
+            return self.compile_rules_inline(rules, max_content_depth=12, max_inline_rules=20, filter_sids=filter_sids)
         except Exception as e:
             print(f"✗ eBPF 编译失败: {e}")
             raise
