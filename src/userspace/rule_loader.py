@@ -314,10 +314,10 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 }
 """
 
-    def compile_rules(self, rules, max_content_depth=8):
+    def compile_rules(self, rules):
         """
         rules 已经是 attempted-recon 类型
-        支持 content 为 str 或 list
+        payload content 可忽略
         """
         parts = [self.header]
         parts.append("int ids_filter(struct __sk_buff *skb) {")
@@ -327,56 +327,47 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
             sid = int(r.get("sid", 0))
             proto = int(r.get("protocol_num", 0) or 0)
             dst_port = r.get("dst_port", None)
-            content = r.get("content", b"") or b""
-
-            # 展平 content
-            if isinstance(content, list):
-                content = b"".join([c.encode("latin1") if isinstance(c, str) else c for c in content])
-            elif isinstance(content, str):
-                content = content.encode("latin1")
-
-            # 截断 content 避免 verifier 报错
-            content = content[:max_content_depth]
-            clen = len(content)
 
             parts.append(f"    /* rule {sid} start */")
             parts.append("    do {")
-
-            # 读取协议
+            # IP 协议
             parts.append("        unsigned char proto_b = 0;")
-            parts.append("        if (bpf_skb_load_bytes(skb, 23, &proto_b, 1) < 0) break;")  # IP header 9 + eth 14
+            parts.append("        if (bpf_skb_load_bytes(skb, 23, &proto_b, 1) < 0) break;")  # IP protocol offset
             if proto != 0:
                 parts.append(f"        if (proto_b != {proto}) break;")
 
-            # dst port
-            if dst_port and isinstance(dst_port, dict) and dst_port.get("type") == "list":
-                ports = dst_port.get("ports", [])
-                if ports:
-                    parts.append("        unsigned char p0=0, p1=0;")
-                    parts.append("        if (bpf_skb_load_bytes(skb, 34, &p0, 1) < 0) break;")  # TCP start at 14+IP(20)
-                    parts.append("        if (bpf_skb_load_bytes(skb, 35, &p1, 1) < 0) break;")
-                    parts.append("        unsigned short dst_port = (p0 << 8) | p1;")
-                    ports_check = " && ".join([f"(dst_port != {p})" for p in ports])
-                    parts.append(f"        if ({ports_check}) break;")
-            else:
-                parts.append("        unsigned short dst_port = 0;")
+            # TCP/UDP dst port
+            if dst_port:
+                parts.append("        unsigned char p0=0, p1=0;")
+                parts.append("        if (bpf_skb_load_bytes(skb, 36, &p0, 1) < 0) break;")  # 偏移到 TCP/UDP dst_port
+                parts.append("        if (bpf_skb_load_bytes(skb, 37, &p1, 1) < 0) break;")
+                parts.append("        unsigned short dst_port_val = (p0 << 8) | p1;")
+                parts.append(f"        if (dst_port_val != {dst_port}) break;")
 
-            # payload content
-            if clen > 0:
-                parts.append("        unsigned int payload_off = 14 + 20;")  # 简单固定 IP header 20B
-                parts.append("        unsigned char btmp = 0;")
-                for i, b in enumerate(content):
-                    parts.append(f"        if (bpf_skb_load_bytes(skb, payload_off + {i}, &btmp, 1) < 0) break;")
-                    parts.append(f"        if (btmp != 0x{b:02x}) break;")
-
-            # 命中规则 -> 更新统计 & 提交事件
+            # 更新 rule 统计
             parts.append(f"        __u32 _k = {sid};")
             parts.append("        __u64 *_c = rule_stats.lookup(&_k);")
             parts.append("        if (_c) (*_c)++; else { __u64 _i = 1; rule_stats.update(&_k, &_i); }")
 
-            # 构造事件（简单示例）
+            # 构造事件：填 src/dst IP + port + proto + sid
+            parts.append("        struct iphdr iph;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14, &iph, sizeof(iph)) < 0) break;")  # 偏移到 IP
             parts.append("        struct packet_event evt = {0};")
-            parts.append(f"        evt.sid = {sid}; evt.protocol = proto_b;")
+            parts.append("        evt.src_ip = iph.saddr;")
+            parts.append("        evt.dst_ip = iph.daddr;")
+            parts.append("        evt.protocol = iph.protocol;")
+            parts.append("        evt.sid = _k;")
+            parts.append("        if (iph.protocol == IPPROTO_TCP) {")
+            parts.append("            struct tcphdr tcph;")
+            parts.append("            if (bpf_skb_load_bytes(skb, 14 + iph.ihl*4, &tcph, sizeof(tcph)) >= 0) {")
+            parts.append("                evt.src_port = tcph.source; evt.dst_port = tcph.dest;")
+            parts.append("            }")
+            parts.append("        } else if (iph.protocol == IPPROTO_UDP) {")
+            parts.append("            struct udphdr udph;")
+            parts.append("            if (bpf_skb_load_bytes(skb, 14 + iph.ihl*4, &udph, sizeof(udph)) >= 0) {")
+            parts.append("                evt.src_port = udph.source; evt.dst_port = udph.dest;")
+            parts.append("            }")
+            parts.append("        }")
             parts.append("        events.perf_submit(skb, &evt, sizeof(evt));")
             parts.append("        return 0;")
             parts.append("    } while(0);")
@@ -385,3 +376,4 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
         parts.append("    return 0;")
         parts.append("}")
         return "\n".join(parts)
+
