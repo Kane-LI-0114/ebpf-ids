@@ -7,6 +7,7 @@ Converts parsed Snort rules to eBPF C code segments
 """
 
 import json
+import os  # ← Add this import
 import ipaddress
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
