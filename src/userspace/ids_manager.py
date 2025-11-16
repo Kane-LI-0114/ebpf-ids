@@ -202,7 +202,7 @@ class EventHandler:
                 ("src_port", ct.c_uint16),  # 2
                 ("dst_port", ct.c_uint16),  # 2
                 ("protocol", ct.c_uint8),  # 1
-                ("_pad", ct.c_ubyte * 3),  # 3 padding 对齐
+                ("_pad", ct.c_ubyte * 3),  # 3 padding bytes
                 ("sid", ct.c_uint32),  # 4
             ]
 
