@@ -314,14 +314,37 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 }
 """
 
+    import socket, struct
+
+    def ip2int(ip):
+        """把点分十进制 IP 转为 uint32 网络字节序"""
+        return struct.unpack("!I", socket.inet_aton(ip))[0]
+
+    HOME_NET_IP = "10.10.1.2"
+    HOME_NET_MASK = "255.255.255.255"  # /32
+    EXTERNAL_NET_IP = "0.0.0.0"
+    EXTERNAL_NET_MASK = "0.0.0.0"
+
+    HOME_NET = ip2int(HOME_NET_IP)
+    HOME_MASK = ip2int(HOME_NET_MASK)
+    EXTERNAL_NET = ip2int(EXTERNAL_NET_IP)
+    EXTERNAL_MASK = ip2int(EXTERNAL_NET_MASK)
+
     def compile_rules(self, rules):
         """
         生成 eBPF C 代码，只匹配 src_ip, src_port, dst_ip, dst_port, protocol
+        自动把 $HOME_NET / $EXTERNAL_NET 替换为整数
         假设传入的 rules 已经是:
             - attempted-recon
             - dst_port = single
         """
         parts = [self.header]
+        # 定义 HOME_NET / EXTERNAL_NET 宏
+        parts.append(f"#define HOME_NET 0x{HOME_NET:08x}")
+        parts.append(f"#define HOME_MASK 0x{HOME_MASK:08x}")
+        parts.append(f"#define EXTERNAL_NET 0x{EXTERNAL_NET:08x}")
+        parts.append(f"#define EXTERNAL_MASK 0x{EXTERNAL_MASK:08x}")
+
         parts.append("int ids_filter(struct __sk_buff *skb) {")
         parts.append("    unsigned char tmp = 0;")
 
@@ -331,8 +354,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 
             # ---------------- dst_port ----------------
             dst_port_tuple = r["dst_port"]
-            ptype, dst_port, _ = dst_port_tuple
-            # 上层保证 ptype == 1，理论上无需检查
+            _, dst_port, _ = dst_port_tuple  # tuple: (ptype, port, 0)
 
             # ---------------- src_port ----------------
             src_port_val = None
@@ -344,6 +366,37 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
                     src_port_val = sp
                 else:
                     src_port_val = None  # 其他类型忽略
+
+            # ---------------- IP 替换 ----------------
+            # src_ip
+            src_ip = r.get("src_ip")
+            if src_ip == "$HOME_NET":
+                src_ip_val = "HOME_NET"
+                src_mask_val = "HOME_MASK"
+            elif src_ip == "$EXTERNAL_NET":
+                src_ip_val = "EXTERNAL_NET"
+                src_mask_val = "EXTERNAL_MASK"
+            elif src_ip:
+                src_ip_val = str(ip2int(src_ip))
+                src_mask_val = "0xffffffff"
+            else:
+                src_ip_val = None
+                src_mask_val = None
+
+            # dst_ip
+            dst_ip = r.get("dst_ip")
+            if dst_ip == "$HOME_NET":
+                dst_ip_val = "HOME_NET"
+                dst_mask_val = "HOME_MASK"
+            elif dst_ip == "$EXTERNAL_NET":
+                dst_ip_val = "EXTERNAL_NET"
+                dst_mask_val = "EXTERNAL_MASK"
+            elif dst_ip:
+                dst_ip_val = str(ip2int(dst_ip))
+                dst_mask_val = "0xffffffff"
+            else:
+                dst_ip_val = None
+                dst_mask_val = None
 
             parts.append(f"    /* rule {sid} start */")
             parts.append("    do {")
@@ -358,11 +411,11 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
             parts.append("        struct iphdr iph = {};")
             parts.append("        if (bpf_skb_load_bytes(skb, 14, &iph, sizeof(iph)) < 0) break;")
 
-            # ------- IP checks (optional) --------
-            if r.get("src_ip"):
-                parts.append(f"        if (iph.saddr != {r['src_ip']}) break;")
-            if r.get("dst_ip"):
-                parts.append(f"        if (iph.daddr != {r['dst_ip']}) break;")
+            # ------- IP checks -------
+            if src_ip_val:
+                parts.append(f"        if ((iph.saddr & {src_mask_val}) != {src_ip_val}) break;")
+            if dst_ip_val:
+                parts.append(f"        if ((iph.daddr & {dst_mask_val}) != {dst_ip_val}) break;")
 
             # ----- load L4 ports -----
             parts.append("        unsigned short src_port_val = 0;")
@@ -408,6 +461,4 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
         parts.append("    return 0;")
         parts.append("}")
         return '\n'.join(parts)
-
-
 
