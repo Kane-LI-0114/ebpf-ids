@@ -315,7 +315,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 }
 """
 
-    def ip2int(ip):
+    def ip2int(self, ip):
         """把点分十进制 IP 转为 uint32 网络字节序"""
         return struct.unpack("!I", socket.inet_aton(ip))[0]
 
@@ -333,10 +333,10 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
         EXTERNAL_NET_IP = "0.0.0.0"
         EXTERNAL_NET_MASK = "0.0.0.0"
 
-        HOME_NET = ip2int(HOME_NET_IP)
-        HOME_MASK = ip2int(HOME_NET_MASK)
-        EXTERNAL_NET = ip2int(EXTERNAL_NET_IP)
-        EXTERNAL_MASK = ip2int(EXTERNAL_NET_MASK)
+        HOME_NET = self.ip2int(HOME_NET_IP)
+        HOME_MASK = self.ip2int(HOME_NET_MASK)
+        EXTERNAL_NET = self.ip2int(EXTERNAL_NET_IP)
+        EXTERNAL_MASK = self.ip2int(EXTERNAL_NET_MASK)
         
         parts = [self.header]
         # 定义 HOME_NET / EXTERNAL_NET 宏
