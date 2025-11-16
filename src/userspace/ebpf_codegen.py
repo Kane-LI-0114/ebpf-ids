@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+
 """
 eBPF Code Generator for Snort TCP Rules
 Converts parsed Snort rules to eBPF C code segments
 """
 
+
 import json
 import os  # ← Add this import
+
+
 import ipaddress
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
@@ -203,12 +207,28 @@ class TCPRuleEBPFCodegen:
         
         elif port_type == "list":
             ports = port_spec.get("ports", [])
-            port_checks = [f"ntohs({port_var}) != {p}" for p in ports]
+
+            # Sanitize and constrain port list to 1–1000
+            valid_ports = []
+            for p in ports:
+                try:
+                    p_int = int(p)
+                except (TypeError, ValueError):
+                    continue  # skip non‑numeric entries
+                if 1 <= p_int <= 1000:
+                    valid_ports.append(p_int)
+
+            # If nothing valid remains, do not emit a broken if()
+            if not valid_ports:
+                return f"    // No valid {direction} ports in list (1–1000); skipping port check"
+
+            port_checks = [f"ntohs({port_var}) != {p}" for p in valid_ports]
             condition = " && ".join(port_checks)
-            return f"""    // Check {direction} port list: {ports}
+
+            return f"""    // Check {direction} port list: {valid_ports}
     if ({condition})
         return 0;"""
-        
+
         elif port_type == "variable":
             var_name = port_spec.get("name", "UNKNOWN")
             return f"""    // Variable port check: {var_name} ({direction})
@@ -405,8 +425,7 @@ class TCPRulesEBPFManager:
         except Exception as e:
             print(f"✗ Failed to export code: {e}")
             raise
-
-
+    
     def export_metadata(self, output_file: str):
         """
         Export rule metadata to JSON
