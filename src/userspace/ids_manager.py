@@ -5,7 +5,7 @@
 eBPF IDS 用户空间管理程序
 
 - 使用 SnortRuleParser 解析 snort3-community.rules（用于告警信息映射）
-- 使用 TCPRulesEBPFManager 生成 eBPF C 代码并导出到内核目录
+- 使用 TCPRulesEBPFManager / UDPRulesEBPFManager 生成 eBPF C 代码并导出到内核目录
 - 使用 BCC 编译、加载、挂载 eBPF 程序（SOCKET_FILTER）
 - 打开 perf buffer alerts，使用 EventHandler 接收并输出告警
 - 进入循环，持续从内核读取事件
@@ -13,7 +13,6 @@ eBPF IDS 用户空间管理程序
 
 import os
 from udp_codegen import UDPRulesEBPFManager
-
 from pathlib import Path
 import sys
 import json
@@ -24,14 +23,11 @@ import struct
 import array
 from datetime import datetime
 from typing import Optional, Union
-
 from bcc import BPF
 
 # 让 utils.SnortRuleParser 可以被导入
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-
 from utils import SnortRuleParser
-
 
 # ---------------------------------------------------------------------------
 # 工具函数：自动检测活动网口
@@ -42,16 +38,14 @@ def get_active_interface() -> str:
     try:
         with open('/proc/net/dev', 'r', encoding='utf-8') as f:
             lines = f.readlines()
-
-        interfaces = []
-        for line in lines[2:]:
-            if ':' in line:
-                iface_name = line.split(':')[0].strip()
-                if iface_name != 'lo':
-                    interfaces.append(iface_name)
-
-        if interfaces:
-            return interfaces[0]
+            interfaces = []
+            for line in lines[2:]:
+                if ':' in line:
+                    iface_name = line.split(':')[0].strip()
+                    if iface_name != 'lo':
+                        interfaces.append(iface_name)
+            if interfaces:
+                return interfaces[0]
         return 'eth0'
     except Exception as e:
         print(f"警告: 无法自动检测网络接口: {e}")
@@ -71,7 +65,7 @@ class RuleManager:
         self.ebpf_configs = []
         self.parser = SnortRuleParser()
 
-        # eBPF 代码生成管理器
+        # eBPF 代码生成管理器（当前主要用于 TCP，UDP 用 UDPRulesEBPFManager）
         from ebpf_codegen import TCPRulesEBPFManager
         self.tcp_codegen = TCPRulesEBPFManager()
 
@@ -106,7 +100,7 @@ class RuleManager:
             print(f"加载失败: {e} (规则文件: {file_path})")
 
     def generate_ebpf_code(self):
-        """示例：如果你还需要用 RuleManager 来生成代码"""
+        """示例：如果你还需要用 RuleManager 来生成 TCP 代码"""
         return self.tcp_codegen.generate_all_code()
 
     def load_tcp_rules(self) -> int:
@@ -136,7 +130,7 @@ class RuleManager:
         """验证规则"""
         required_fields = [
             'action', 'protocol', 'src_ip', 'src_port',
-            'direction', 'dst_ip', 'dst_port'
+            'direction', 'dst_ip', 'dst_port',
         ]
         return all(field in rule for field in required_fields)
 
@@ -220,7 +214,8 @@ class EventHandler:
             "src_port": alert.src_port,
             "dst_ip": dst_ip,
             "dst_port": alert.dst_port,
-            "protocol": "TCP",
+            # 这里修正为 UDP，因为当前程序只处理 UDP 规则
+            "protocol": "UDP",
         }
 
         self.log_alert(alert_info)
@@ -285,14 +280,11 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
 KERNEL_DIR = os.path.join(PROJECT_ROOT, "src", "kernel")
 USERSPACE_DIR = os.path.join(PROJECT_ROOT, "src", "userspace", "ebpf-ids")
-
 TCP_RULES_C_PATH = os.path.join(KERNEL_DIR, "tcp_rules.c")
 udp_c_path = os.path.join(KERNEL_DIR, 'udp_rules.c')
 udp_meta_path = os.path.join(KERNEL_DIR, 'udp_rules_metadata.json')
-
 TCP_RULES_META_PATH = os.path.join(KERNEL_DIR, "tcp_rules_metadata.json")
 SNORT_RULES_JSON = os.path.join(PROJECT_ROOT, "snort_rules_ebpf.json")
-
 
 from ebpf_codegen import TCPRulesEBPFManager
 
@@ -302,13 +294,13 @@ class IDSManager:
         self.bpf: Optional[BPF] = None
         self.tcp_rules_manager = TCPRulesEBPFManager()
         self.udp_rules_manager = UDPRulesEBPFManager()
-
-        # 用 RuleManager 只做“规则元数据 + sid_to_rule 映射”
+        # 用 RuleManager 做“规则元数据 + sid_to_rule 映射”
         self.rule_manager = RuleManager(rules_dir=PROJECT_ROOT)
         self.event_handler = EventHandler(self.rule_manager)
-
         # 保存 raw socket 对象，避免被 GC 回收
         self.sock = None
+        # 当前使用的网卡名称
+        self.iface: Optional[str] = None
 
     # ----------------------- 规则加载与代码生成 -----------------------
 
@@ -318,7 +310,6 @@ class IDSManager:
         这个 JSON 是你前置脚本生成的（比如从 SnortRuleParser 导出）。
         """
         print("初始化 eBPF IDS 系统...")
-
         if not os.path.isfile(json_path):
             raise FileNotFoundError(f"规则文件未找到: {json_path}")
 
@@ -334,7 +325,7 @@ class IDSManager:
                 continue
 
     def generate_tcp_rules_code(self):
-        """生成 eBPF C 代码并导出到内核目录"""
+        """生成 eBPF C 代码并导出到内核目录（TCP）"""
         print("正在生成 TCP 规则的 eBPF 代码...")
         result = self.tcp_rules_manager.generate_all_code()
         print(f"✓ 已生成 {result['count']} 条 TCP 规则的 eBPF 代码")
@@ -344,39 +335,47 @@ class IDSManager:
         # 导出 C 代码和元数据
         self.tcp_rules_manager.export_code(TCP_RULES_C_PATH)
         print(f"✓ 已导出 eBPF 代码到: {TCP_RULES_C_PATH}")
-
         self.tcp_rules_manager.export_metadata(TCP_RULES_META_PATH)
         print(f"✓ 已导出规则元数据到: {TCP_RULES_META_PATH}")
 
-    # ----------------------- eBPF 编译、加载、挂载 -----------------------
-    # Add methods for UDP rule handling
-    def load_udp_rules(self, json_path: str = SNORT_RULES_JSON):
-       with open(json_path, "r") as f:
-         all_rules = json.load(f)
+    # ----------------------- UDP 规则处理 -----------------------
 
-       udp_count = 0
-       for rule in all_rules:
-          if rule.get("protocol_num") == 17:
-             if self.udp_rules_manager.add_rule(rule):
-                  udp_count += 1
-       print(f"✓ 已加载 {udp_count} 条 UDP 规则")
-       return udp_count
+    def load_udp_rules(self, json_path: str = SNORT_RULES_JSON):
+        with open(json_path, "r") as f:
+            all_rules = json.load(f)
+
+        udp_count = 0
+        for rule in all_rules:
+            if rule.get("protocol_num") == 17:
+                if self.udp_rules_manager.add_rule(rule):
+                    udp_count += 1
+
+        print(f"✓ 已加载 {udp_count} 条 UDP 规则")
+        return udp_count
+
     def generate_udp_rules_code(self):
         print("Generating UDP rules eBPF code...")
         result = self.udp_rules_manager.generate_all_code()
 
-    # Export to kernel directory
-        udp_c_path = os.path.join(KERNEL_DIR, "udp_rules.c")
-        udp_meta_path = os.path.join(KERNEL_DIR, "udp_rules_metadata.json")
+        # Export to kernel directory
+        udp_c_out = os.path.join(KERNEL_DIR, "udp_rules.c")
+        udp_meta_out = os.path.join(KERNEL_DIR, "udp_rules_metadata.json")
 
-        self.udp_rules_manager.export_code(udp_c_path)
-        self.udp_rules_manager.export_metadata(udp_meta_path)
+        self.udp_rules_manager.export_code(udp_c_out)
+        self.udp_rules_manager.export_metadata(udp_meta_out)
 
+        print(f"✓ Exported C code to: {udp_c_out}")
+        print(f"✓ Exported metadata to: {udp_meta_out}")
         print(f"✓ Generated {result['count']} UDP rules")
         return result
 
-    def load_ebpf_program(self):
-        """编译和加载 eBPF 程序，并作为 socket filter 挂载到接口"""
+    # ----------------------- eBPF 编译、加载、挂载 -----------------------
+
+    def load_ebpf_program(self, iface: Optional[str] = None):
+        """
+        编译和加载 eBPF 程序，并作为 socket filter 挂载到接口。
+        如果传入 iface，则优先使用该网卡；否则自动检测。
+        """
         print("正在编译 eBPF 程序...")
 
         if not os.path.isfile(udp_c_path):
@@ -392,16 +391,18 @@ class IDSManager:
             # 编译 BPF
             self.bpf = BPF(text=kernel_code)
 
-            # 内核中主函数为：int ids_filter(struct __sk_buff *skb)
-            iface = get_active_interface()
-            try:
-                fn = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
-                # 作为 raw socket filter 挂载到网卡
-                self.sock = self.bpf.attach_raw_socket(fn, iface)
-                print(f"✓ eBPF 程序编译并作为 socket filter 挂载到接口 {iface}")
-            except Exception as e:
-                print(f"⚠️ 无法挂载 socket filter 程序（请检查函数名/权限）: {e}")
+            # 选择网卡：优先使用调用方指定的 iface
+            if iface is not None:
+                self.iface = iface
+            else:
+                self.iface = get_active_interface()
 
+            # 内核中主函数为：int ids_filter(struct __sk_buff *skb)
+            fn = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
+
+            # 作为 raw socket filter 挂载到网卡
+            self.sock = self.bpf.attach_raw_socket(fn, self.iface)
+            print(f"✓ eBPF 程序编译并作为 socket filter 挂载到接口 {self.iface}")
         except Exception as e:
             print("getcwd:", os.getcwd())
             print(f"✗ 加载 eBPF 程序失败: {e}")
@@ -422,8 +423,6 @@ class IDSManager:
             print("✓ 已打开 alerts perf buffer")
         except KeyError:
             print("⚠️ 未找到名为 'alerts' 的 perf buffer，请检查 eBPF 程序中的 map 名称")
-
-        # 当前生成的 eBPF 代码没有 packet_events 之类的额外 map，这里就不再订阅
 
     def run(self):
         """进入监控循环，持续从 perf buffer 读取事件"""
@@ -455,18 +454,18 @@ class IDSManager:
 
     # ----------------------- 总初始化流程 -----------------------
 
-    def init_ids(self):
+    def init_ids(self, iface: Optional[str] = None):
         """高层初始化流程：规则 -> C 代码 -> eBPF 程序"""
         try:
             # 1. 解析原始 Snort 规则，用于 EventHandler 的 sid_to_rule 映射
             self.rule_manager.load_rules()
 
-           # Add UDP rule loading
+            # 2. 加载 UDP 规则并生成 eBPF C 代码
             self.load_udp_rules()
             self.generate_udp_rules_code()
 
-            # 4. 编译、加载并挂载 eBPF 程序
-            self.load_ebpf_program()
+            # 3. 编译、加载并挂载 eBPF 程序（显式指定或自动检测网卡）
+            self.load_ebpf_program(iface=iface)
 
             print("✓ IDS 初始化完成")
         except Exception as e:
@@ -486,7 +485,12 @@ def main():
         pass
 
     manager = IDSManager()
-    manager.init_ids()
+
+    # 在这里显式指定 victim 的网卡名称（例如 GCP 默认是 ens4）
+    # 如果你希望继续自动检测，则将 victim_iface 改为 None
+    victim_iface = "ens4"  # TODO: 如有需要，请改成实际承载 10.10.1.2 的接口名
+
+    manager.init_ids(iface=victim_iface)
     manager.setup_event_buffers()
     manager.run()
 
