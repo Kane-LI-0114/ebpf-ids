@@ -288,229 +288,123 @@ class RuleParser:
 
 class RuleCompiler:
     def __init__(self):
-        # TCP 模板
-        self.template_tcp = r"""
-    /* rule {sid} (tcp) */
-    int ids_filter(struct __sk_buff *skb) __attribute__((section("socket"), used));
-    do {{
-        unsigned char iphdr[20];
-        if (bpf_skb_load_bytes(skb, 14, iphdr, 20) < 0) break;
-        if (iphdr[9] != 6) break;  // TCP
-
-        unsigned int ihl = (iphdr[0] & 0x0F) * 4;
-        unsigned int l4 = 14 + ihl;
-
-        unsigned char flags = 0;
-        if (bpf_skb_load_bytes(skb, l4 + 13, &flags, 1) < 0) break;
-
-        // required TCP flags
-        if (!({flag_expr})) break;
-
-        {content_code}
-
-        // matched
-        UPDATE_STATS_AND_EMIT_EVENT({sid});
-        return 0;
-    }} while (0);
-    """
-
-        # UDP 模板
-        self.template_udp = r"""
-    /* rule {sid} (udp) */
-    int ids_filter(struct __sk_buff *skb) __attribute__((section("socket"), used));
-    do {{
-        unsigned char iphdr[20];
-        if (bpf_skb_load_bytes(skb, 14, iphdr, 20) < 0) break;
-        if (iphdr[9] != 17) break;  // UDP
-
-        unsigned int ihl = (iphdr[0] & 0x0F) * 4;
-        unsigned int l4 = 14 + ihl;
-
-        unsigned short dport = 0;
-        unsigned char dp0 = 0, dp1 = 0;
-        if (bpf_skb_load_bytes(skb, l4 + 2, &dp0, 1) < 0 ||
-            bpf_skb_load_bytes(skb, l4 + 3, &dp1, 1) < 0) break;
-        dport = (dp0 << 8) | dp1;
-
-        if ({port_check}) break;
-
-        {content_code}
-
-        UPDATE_STATS_AND_EMIT_EVENT({sid});
-        return 0;
-    }} while (0);
-    """
-
-        # ICMP 模板
-        self.template_icmp = r"""
-    /* rule {sid} (icmp) */
-    int ids_filter(struct __sk_buff *skb) __attribute__((section("socket"), used));
-    do {{
-        unsigned char proto = 0;
-        if (bpf_skb_load_bytes(skb, 14 + 9, &proto, 1) < 0) break;
-        if (proto != 1) break; // ICMP
-
-        unsigned char type = 0;
-        if (bpf_skb_load_bytes(skb, 14 + 20, &type, 1) < 0) break;
-
-        if (type != {icmp_type}) break;
-
-        UPDATE_STATS_AND_EMIT_EVENT({sid});
-        return 0;
-    }} while (0);
-    """
-
-    # ----------------------------------------------------------------------
+        pass
 
     def compile_rules(self, rules):
-        """
-        输入：json rule 列表（已过滤 attempted-recon）
-        输出：拼接好的 C 代码字符串
-        """
-        output = []
+
+        if not rules:
+            return ""
+
+        code = []
+
+        # --- Header ---
+        code.append(r"""
+#include <uapi/linux/bpf.h>
+#include <uapi/linux/in.h>
+#include <linux/bpf.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
+
+BPF_PERF_OUTPUT(events);
+
+struct event_t {
+    u32 src_ip;
+    u32 dst_ip;
+    u16 src_port;
+    u16 dst_port;
+    u32 rule_id;
+};
+
+static __always_inline int match_rule(struct __sk_buff *skb, void *data, void *data_end, u32 sid)
+{
+    struct iphdr *ip = data + sizeof(struct ethhdr);
+    if ((void *)(ip + 1) > data_end)
+        return 0;
+
+    // Only IPv4
+    if (ip->version != 4)
+        return 0;
+
+    // Transport header
+    u8 *trans = (u8 *)ip + ip->ihl * 4;
+    if (trans >= (u8 *)data_end)
+        return 0;
+
+    struct event_t evt = {};
+    evt.src_ip = ip->saddr;
+    evt.dst_ip = ip->daddr;
+    evt.rule_id = sid;
+""")
+
+        # --- Rule blocks ---
         for r in rules:
-            c = self.compile_one_rule(r)
-            if c:
-                output.append(c)
-        return "\n".join(output)
+            proto = r.get("protocol_num")
+            sid = r.get("sid", 0)
+            dst_ports = r.get("dst_port")
 
-    # ----------------------------------------------------------------------
+            # 跳过无端口或无协议的规则（避免生成垃圾代码）
+            if proto not in (6, 17):  # TCP / UDP
+                continue
+            if not dst_ports:
+                continue
+            if dst_ports["type"] != "list":
+                continue
 
-    def compile_one_rule(self, rule):
-        """根据协议类型选择模板"""
-        proto = rule.get("protocol_num")
+            ports = dst_ports["ports"]
+            if not ports:
+                continue
 
-        if proto == 6:
-            return self.compile_tcp_rule(rule)
-        elif proto == 17:
-            return self.compile_udp_rule(rule)
-        elif proto == 1:
-            return self.compile_icmp_rule(rule)
-        else:
-            return None
+            code.append("    // Rule SID %d\n" % sid)
 
-    # ----------------------------------------------------------------------
+            # protocol
+            code.append("    if (ip->protocol != %d) goto next_rule_%d;" % (proto, sid))
 
-    def compile_tcp_rule(self, rule):
-        sid = rule["sid"]
-
-        # ---------------- generate flags check -------------------
-        flags = rule.get("tcp_flags", {})
-        flag_expr = self.gen_flag_expr(flags)
-
-        # ---------------- generate content code -------------------
-        content_code = self.gen_content_code(rule.get("content", []))
-
-        return self.template_tcp.format(
-            sid=sid,
-            flag_expr=flag_expr,
-            content_code=content_code
-        )
-
-    # ----------------------------------------------------------------------
-
-    def compile_udp_rule(self, rule):
-        sid = rule["sid"]
-
-        # port check
-        dport = rule.get("dst_port")
-        if not dport:
-            port_check = "0"      # 永远通过
-        else:
-            port_check = f"dport != {dport['port']}"
-
-        # content
-        content_code = self.gen_content_code(rule.get("content", []))
-
-        return self.template_udp.format(
-            sid=sid,
-            port_check=port_check,
-            content_code=content_code
-        )
-
-    # ----------------------------------------------------------------------
-
-    def compile_icmp_rule(self, rule):
-        sid = rule["sid"]
-
-        icmp_type = rule.get("icmp_type", 8)  # 默认 echo-request
-
-        return self.template_icmp.format(
-            sid=sid,
-            icmp_type=icmp_type
-        )
-
-    # ----------------------------------------------------------------------
-
-    def gen_flag_expr(self, flags):
-        """
-        生成 flags 表达式，例如：
-        TCP SYN → (flags & 0x02)
-        TCP NULL → (flags == 0)
-        TCP FIN → (flags & 0x01)
-        """
-        if not flags:
-            return "1"  # 不限制
-
-        exprs = []
-        if flags.get("syn"):
-            exprs.append("(flags & 0x02)")
-        if flags.get("fin"):
-            exprs.append("(flags & 0x01)")
-        if flags.get("null"):
-            exprs.append("(flags == 0)")
-        if flags.get("xmas"):
-            exprs.append("((flags & 0x29) == 0x29)")
-
-        if not exprs:
-            return "1"
-
-        return " && ".join(exprs)
-
-    # ----------------------------------------------------------------------
-
-    def gen_content_code(self, content_list):
-        """
-        content_list 为 Snort content 条件数组，生成 payload 匹配代码
-        """
-        if not content_list:
-            return "// no payload match"
-
-        lines = ["// payload checks"]
-
-        offset = 0
-        for item in content_list:
-            # e.g.  "BN|10 00 02 00|\",depth 6"
-            cond, *rest = item.split(",")
-            cond = cond.strip()
-
-            # split raw and depth
-            if "|" in cond:
-                # "BN|10 00 02 00|" 这种混合格式
-                parts = cond.split("|")
-                prefix = parts[0]
-                raw_bytes = parts[1].strip()
-                byte_values = prefix.encode().hex().upper().split()
-                if raw_bytes:
-                    byte_values += raw_bytes.split()
+            # tcp / udp header
+            if proto == 6:
+                code.append("    struct tcphdr *tcp = (void *)trans;")
+                code.append("    if ((void *)(tcp + 1) > data_end) return 0;")
+                code.append("    evt.src_port = tcp->source;")
+                code.append("    evt.dst_port = tcp->dest;")
             else:
-                # 单字符串
-                byte_values = cond.encode().hex().upper().split()
+                code.append("    struct udphdr *udp = (void *)trans;")
+                code.append("    if ((void *)(udp + 1) > data_end) return 0;")
+                code.append("    evt.src_port = udp->source;")
+                code.append("    evt.dst_port = udp->dest;")
 
-            depth = 0
-            for r in rest:
-                if "depth" in r:
-                    depth = int(r.split()[-1])
+            # port match
+            port_checks = " || ".join([f"evt.dst_port == bpf_htons({p})" for p in ports])
+            code.append(f"    if (!({port_checks})) goto next_rule_{sid};")
 
-            # eBPF payload match
-            for i, bv in enumerate(byte_values):
-                off = offset + i
-                lines.append(
-                    f"unsigned char b{off}=0; "
-                    f"if (bpf_skb_load_bytes(skb, payload_off + {off}, &b{off}, 1) < 0 || "
-                    f"b{off} != 0x{bv}) break;"
-                )
+            # matched
+            code.append("    events.perf_submit_skb(skb, skb->len, &evt, sizeof(evt));")
+            code.append("    return 0;")
 
-            offset += depth
+            code.append(f"next_rule_{sid}: ;\n")
 
-        return "\n    ".join(lines)
+        # --- End function ---
+        code.append("    return 0;\n")
+
+        # --- Entry program ---
+        code.append(r"""
+SEC("socket")
+int ids_filter(struct __sk_buff *skb)
+{
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end)
+        return 0;
+
+    if (eth->h_proto != bpf_htons(ETH_P_IP))
+        return 0;
+
+    return match_rule(skb, data, data_end, 0);
+}
+
+char _license[] SEC("license") = "GPL";
+""")
+
+        return "\n".join(code)
