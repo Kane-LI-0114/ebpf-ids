@@ -328,6 +328,43 @@ class IDSManager:
         self.event_handler = None
         self.running = False
 
+    def filter_rules(rules):
+        filtered = []
+
+        for rule in rules:
+            # 1) 只要 attempted-recon
+            if rule.get("classtype") != "attempted-recon":
+                continue
+
+            # 2) 只允许 L3/L4 协议（TCP/UDP/ICMP）
+            if rule.get("protocol_num") not in [1, 6, 17]:
+                continue
+
+            # 3) 不允许 content/payload 匹配（eBPF 做不了）
+            if "content" in rule and rule["content"]:
+                continue
+
+            # 4) dst_port 必须存在且是 single 类型（多端口太复杂）
+            dp = rule.get("dst_port")
+            if not dp:
+                continue
+            if dp["type"] != "single":
+                continue
+
+            # 5) port 必须是有效端口
+            port = dp.get("port")
+            if not isinstance(port, int) or port <= 0 or port > 65535:
+                continue
+
+            # 6) SRC_PORT 不允许存在复杂条件
+            sp = rule.get("src_port")
+            if sp and sp.get("type") != "single":
+                continue
+
+            filtered.append(rule)
+
+        return filtered
+
     def load_ebpf_program(self):
         print("正在动态生成并编译 eBPF 程序...")
         try:
@@ -376,43 +413,6 @@ class IDSManager:
         except Exception as e:
             print(f"✗ eBPF 编译失败: {e}")
             return False
-
-    def filter_rules(rules):
-        filtered = []
-
-        for rule in rules:
-            # 1) 只要 attempted-recon
-            if rule.get("classtype") != "attempted-recon":
-                continue
-
-            # 2) 只允许 L3/L4 协议（TCP/UDP/ICMP）
-            if rule.get("protocol_num") not in [1, 6, 17]:
-                continue
-
-            # 3) 不允许 content/payload 匹配（eBPF 做不了）
-            if "content" in rule and rule["content"]:
-                continue
-
-            # 4) dst_port 必须存在且是 single 类型（多端口太复杂）
-            dp = rule.get("dst_port")
-            if not dp:
-                continue
-            if dp["type"] != "single":
-                continue
-
-            # 5) port 必须是有效端口
-            port = dp.get("port")
-            if not isinstance(port, int) or port <= 0 or port > 65535:
-                continue
-
-            # 6) SRC_PORT 不允许存在复杂条件
-            sp = rule.get("src_port")
-            if sp and sp.get("type") != "single":
-                continue
-
-            filtered.append(rule)
-
-        return filtered
 
     def attach_probes(self):
         try:
