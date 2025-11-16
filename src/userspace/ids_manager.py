@@ -7,6 +7,7 @@ eBPF IDS 用户空间管理程序
 """
 
 import os
+from pathlib import Path  # at top of file
 import sys
 import json
 import signal
@@ -17,6 +18,7 @@ import array
 from datetime import datetime
 import sys
 import os
+from typing import Optional, Union
 
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -45,31 +47,44 @@ def get_active_interface():
         print(f"警告: 无法自动检测网络接口: {e}")
         return 'eth0'
 
+from pathlib import Path
+from typing import Optional, Union
+
 class RuleManager:
     """规则管理器"""
-    def __init__(self, rules_dir):
-        self.rules_dir = rules_dir
+    def __init__(self, rules_dir: str):
+        self.rules_dir = Path(rules_dir)
         self.rules = []
-        self.ebpf_configs = []  # FIX: Initialize this list
+        self.ebpf_configs = []
         self.parser = SnortRuleParser()
 
-    def load_rules(self):
-        """从规则目录加载规则"""
-        file_path = "/Users/goodtam8/Documents/Programming/ebpf-ids/snort3-community.rules"
+    def load_rules(
+        self,
+        rule_file: Optional[Union[str, Path]] = None,
+    ):
+        """从规则目录加载规则（支持动态路径）"""
+
+        if rule_file is None:
+            # 方案 A：规则文件放在 rules 目录
+            # file_path = self.rules_dir / "snort3-community.rules"
+
+            # 方案 B：规则文件放在项目根目录（和原来一样）
+            project_root = Path(__file__).resolve().parents[2]
+            file_path = project_root / "snort3-community.rules"
+        else:
+            # 支持 "~" 等写法，并转换成绝对路径
+            file_path = Path(rule_file).expanduser().resolve()
+
         try:
-            # 第二步：通过实例调用方法
-            parsed_rules = self.parser.parse_file(file_path)
-            
+            parsed_rules = self.parser.parse_file(str(file_path))
             for rule in parsed_rules:
                 if self.validate_rule(rule):
                     self.rules.append(rule)
-                    
-                    # 第三步：转换为 eBPF 配置
                     ebpf_config = self.parser.to_ebpf_config(rule)
                     self.ebpf_configs.append(ebpf_config)
-        
         except Exception as e:
-            print(f"加载失败: {e}")
+            print(f"加载失败: {e} (规则文件: {file_path})")
+
 
     def parse_rule(self, rule_line):
         """解析单条规则"""
@@ -162,6 +177,10 @@ class IDSManager:
         self.bpf = None
         self.rule_manager = RuleManager(rules_dir)
         self.event_handler = None
+          # 项目根目录：.../ebpf-ids
+        self.project_root = Path(__file__).resolve().parents[2]
+        # 规则文件默认路径
+        self.default_rule_file = self.project_root / "snort3-community.rules"
 
     def load_ebpf_program(self):
         """加载 eBPF 程序"""
