@@ -338,8 +338,9 @@ class IDSManager:
                 return False
 
             # 1.1️⃣ 快速筛选 attempted-recon
-            recon_rules = [r for r in rules if r.get("classtype") == "attempted-recon"][:20]
-            print(f"✓ 共筛选出 {len(recon_rules)} 条 attempted-recon 规则")
+            filtered_rules = filter_rules(rules)
+            # recon_rules = [r for r in rules if r.get("classtype") == "attempted-recon"][:20]
+            print(f"✓ 共筛选出 {len(filtered_rules)} 条 attempted-recon 规则")
 
             if not recon_rules:
                 print("⚠ 没有 attempted-recon 类型规则，跳过 eBPF 编译")
@@ -347,7 +348,7 @@ class IDSManager:
 
             # 2️⃣ 动态生成 eBPF C 代码
             compiler = RuleCompiler()
-            ebpf_source = compiler.compile_rules(recon_rules)
+            ebpf_source = compiler.compile_rules(filtered_rules)
             print(f"生成的 C 代码长度: {len(ebpf_source)}")
 
             # 3️⃣ 写入临时文件以供调试
@@ -375,6 +376,43 @@ class IDSManager:
         except Exception as e:
             print(f"✗ eBPF 编译失败: {e}")
             return False
+
+    def filter_rules(rules):
+        filtered = []
+
+        for rule in rules:
+            # 1) 只要 attempted-recon
+            if rule.get("classtype") != "attempted-recon":
+                continue
+
+            # 2) 只允许 L3/L4 协议（TCP/UDP/ICMP）
+            if rule.get("protocol_num") not in [1, 6, 17]:
+                continue
+
+            # 3) 不允许 content/payload 匹配（eBPF 做不了）
+            if "content" in rule and rule["content"]:
+                continue
+
+            # 4) dst_port 必须存在且是 single 类型（多端口太复杂）
+            dp = rule.get("dst_port")
+            if not dp:
+                continue
+            if dp["type"] != "single":
+                continue
+
+            # 5) port 必须是有效端口
+            port = dp.get("port")
+            if not isinstance(port, int) or port <= 0 or port > 65535:
+                continue
+
+            # 6) SRC_PORT 不允许存在复杂条件
+            sp = rule.get("src_port")
+            if sp and sp.get("type") != "single":
+                continue
+
+            filtered.append(rule)
+
+        return filtered
 
     def attach_probes(self):
         try:
