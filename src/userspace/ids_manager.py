@@ -332,33 +332,19 @@ class IDSManager:
         filtered = []
 
         for rule in rules:
-            # 1) 只要 attempted-recon
+
+            # 1) 只保留 attempted-recon
             if rule.get("classtype") != "attempted-recon":
                 continue
 
-            # 2) 只允许 L3/L4 协议（TCP/UDP/ICMP）
-            if rule.get("protocol_num") not in [1, 6, 17]:
-                continue
-
-            # 3) 不允许 content/payload 匹配（eBPF 做不了）
-            if "content" in rule and rule["content"]:
-                continue
-
-            # 4) dst_port 必须存在且是 single 类型（多端口太复杂）
+            # 2) 只保留 dst_port 为 single 的规则
             dp = rule.get("dst_port")
-            if not dp:
-                continue
-            if dp["type"] != "single":
+            if not dp or dp.get("type") != "single":
                 continue
 
-            # 5) port 必须是有效端口
+            # 3) 校验端口合法性
             port = dp.get("port")
-            if not isinstance(port, int) or port <= 0 or port > 65535:
-                continue
-
-            # 6) SRC_PORT 不允许存在复杂条件
-            sp = rule.get("src_port")
-            if sp and sp.get("type") != "single":
+            if not isinstance(port, int) or not (1 <= port <= 65535):
                 continue
 
             filtered.append(rule)

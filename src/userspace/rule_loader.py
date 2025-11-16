@@ -316,9 +316,8 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 
     def compile_rules(self, rules):
         """
-        rules 已经是 attempted-recon 类型
-        支持 dst_port 为 null / single / list
-        payload content 可忽略
+        仅根据 src_ip, src_port, dst_ip, dst_port, protocol 进行匹配
+        rules: attempted-recon + single dst_port
         """
         parts = [self.header]
         parts.append("int ids_filter(struct __sk_buff *skb) {")
@@ -331,63 +330,72 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 
             parts.append(f"    /* rule {sid} start */")
             parts.append("    do {")
-            # IP 协议
+
+            # ----- load protocol -----
             parts.append("        unsigned char proto_b = 0;")
-            parts.append("        if (bpf_skb_load_bytes(skb, 23, &proto_b, 1) < 0) break;")  # IP protocol offset
+            parts.append("        if (bpf_skb_load_bytes(skb, 23, &proto_b, 1) < 0) break;")
+
             if proto != 0:
                 parts.append(f"        if (proto_b != {proto}) break;")
 
-            # TCP/UDP dst port
+            # ----- load IP header -----
+            parts.append("        struct iphdr iph = {};")
+            parts.append("        if (bpf_skb_load_bytes(skb, 14, &iph, sizeof(iph)) < 0) break;")
+
+            # ------- IP checks (all optional) --------
+            if r.get("src_ip"):
+                parts.append(f"        if (iph.saddr != {r['src_ip']}) break;")
+
+            if r.get("dst_ip"):
+                parts.append(f"        if (iph.daddr != {r['dst_ip']}) break;")
+
+            # ----- load L4 ports -----
+            parts.append("        unsigned short src_port_val = 0;")
             parts.append("        unsigned short dst_port_val = 0;")
-            parts.append("        if (proto_b == IPPROTO_TCP || proto_b == IPPROTO_UDP) {")
-            parts.append("            unsigned char p0=0, p1=0;")
-            parts.append("            if (bpf_skb_load_bytes(skb, 36, &p0, 1) < 0) break;")
-            parts.append("            if (bpf_skb_load_bytes(skb, 37, &p1, 1) < 0) break;")
-            parts.append("            dst_port_val = (p0 << 8) | p1;")
-            # 判断端口类型
-            if dst_port is None:
-                # null 不检查端口
-                pass
-            elif isinstance(dst_port, dict) and dst_port.get("type") == "single":
-                port = dst_port.get("port", 0)
-                parts.append(f"            if (dst_port_val != {port}) break;")
-            elif isinstance(dst_port, dict) and dst_port.get("type") == "list":
-                ports = dst_port.get("ports", [])
-                if ports:
-                    check = " && ".join([f"(dst_port_val != {p})" for p in ports])
-                    parts.append(f"            if ({check}) break;")
+
+            parts.append("        if (proto_b == IPPROTO_TCP) {")
+            parts.append("            struct tcphdr th = {};")
+            parts.append("            if (bpf_skb_load_bytes(skb, 14 + iph.ihl*4, &th, sizeof(th)) < 0) break;")
+            parts.append("            src_port_val = th.source;")
+            parts.append("            dst_port_val = th.dest;")
+
+            parts.append("        } else if (proto_b == IPPROTO_UDP) {")
+            parts.append("            struct udphdr uh = {};")
+            parts.append("            if (bpf_skb_load_bytes(skb, 14 + iph.ihl*4, &uh, sizeof(uh)) < 0) break;")
+            parts.append("            src_port_val = uh.source;")
+            parts.append("            dst_port_val = uh.dest;")
             parts.append("        }")
 
-            # 更新 rule 统计
+            # ------- Port checks -------
+            if dst_port and dst_port.get("type") == "single":
+                port = dst_port["port"]
+                parts.append(f"        if (dst_port_val != {port}) break;")
+
+            if r.get("src_port"):
+                parts.append(f"        if (src_port_val != {r['src_port']}) break;")
+
+            # ----- Update stats -----
             parts.append(f"        __u32 _k = {sid};")
             parts.append("        __u64 *_c = rule_stats.lookup(&_k);")
             parts.append("        if (_c) (*_c)++; else { __u64 _i = 1; rule_stats.update(&_k, &_i); }")
 
-            # 构造事件：填 src/dst IP + port + proto + sid
-            parts.append("        struct iphdr iph;")
-            parts.append("        if (bpf_skb_load_bytes(skb, 14, &iph, sizeof(iph)) < 0) break;")  # 偏移到 IP
+            # ----- Build event -----
             parts.append("        struct packet_event evt = {0};")
             parts.append("        evt.src_ip = iph.saddr;")
             parts.append("        evt.dst_ip = iph.daddr;")
-            parts.append("        evt.protocol = iph.protocol;")
+            parts.append("        evt.protocol = proto_b;")
+            parts.append("        evt.src_port = src_port_val;")
+            parts.append("        evt.dst_port = dst_port_val;")
             parts.append("        evt.sid = _k;")
-            parts.append("        if (iph.protocol == IPPROTO_TCP) {")
-            parts.append("            struct tcphdr tcph;")
-            parts.append("            if (bpf_skb_load_bytes(skb, 14 + iph.ihl*4, &tcph, sizeof(tcph)) >= 0) {")
-            parts.append("                evt.src_port = tcph.source; evt.dst_port = tcph.dest;")
-            parts.append("            }")
-            parts.append("        } else if (iph.protocol == IPPROTO_UDP) {")
-            parts.append("            struct udphdr udph;")
-            parts.append("            if (bpf_skb_load_bytes(skb, 14 + iph.ihl*4, &udph, sizeof(udph)) >= 0) {")
-            parts.append("                evt.src_port = udph.source; evt.dst_port = udph.dest;")
-            parts.append("            }")
-            parts.append("        }")
+
             parts.append("        events.perf_submit(skb, &evt, sizeof(evt));")
             parts.append("        return 0;")
+
             parts.append("    } while(0);")
             parts.append(f"    /* rule {sid} end */")
 
         parts.append("    return 0;")
         parts.append("}")
-        return "\n".join(parts)
+        return '\\n'.join(parts)
+
 
