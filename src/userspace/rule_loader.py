@@ -322,8 +322,7 @@ char _license[] = "GPL";
 
     def compile_rules(self, rules, max_content_depth=8, max_inline_rules=20):
         # 仅保留 attempted-recon
-        recon_rules = [r for r in rules if r.get("classtype") == "attempted-recon"]
-        print(f"✓ 共筛选出 {len(recon_rules)} 条 attempted-recon 规则")
+        recon_rules = rules
 
         if not recon_rules:
             return self.header + "\nint ids_filter(struct __sk_buff *skb) { return 0; }\n"

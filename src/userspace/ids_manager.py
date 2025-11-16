@@ -356,17 +356,17 @@ class IDSManager:
                 print("⚠ 未找到任何规则文件，请检查 rules_dir 是否正确。")
                 return False
 
-            # # 1.1️⃣ 快速筛选 attempted-recon
-            # recon_rules = [r for r in rules if r.get("classtype") == "attempted-recon"]
-            # print(f"✓ 共筛选出 {len(recon_rules)} 条 attempted-recon 规则")
-            #
-            # if not recon_rules:
-            #     print("⚠ 没有 attempted-recon 类型规则，跳过 eBPF 编译")
-            #     return False
+            # 1.1️⃣ 快速筛选 attempted-recon
+            recon_rules = [r for r in rules if r.get("classtype") == "attempted-recon"]
+            print(f"✓ 共筛选出 {len(recon_rules)} 条 attempted-recon 规则")
+
+            if not recon_rules:
+                print("⚠ 没有 attempted-recon 类型规则，跳过 eBPF 编译")
+                return False
 
             # 2️⃣ 动态生成 eBPF C 代码
             compiler = RuleCompiler()
-            ebpf_source = compiler.compile_rules(rules)
+            ebpf_source = compiler.compile_rules(recon_rules)
             print(f"DEBUG: ebpf_source={ebpf_source!r}")
             print(f"生成的 C 代码长度: {len(ebpf_source)}")
 
