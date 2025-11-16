@@ -287,19 +287,14 @@ class RuleParser:
 
 
 class RuleCompiler:
-    """
-    动态生成 BCC eBPF C 代码，专门用于 attempted-recon 类型规则。
-    生成的 C 文件可以直接用 BPF.load_func("ids_filter", BPF.SOCKET_FILTER)
-    """
-
     def __init__(self):
-        # 头文件，仅保留 uapi 的最小集合
         self.header = r"""
-#include <uapi/linux/bpf.h>
 #include <uapi/linux/if_ether.h>
 #include <uapi/linux/ip.h>
 #include <uapi/linux/tcp.h>
 #include <uapi/linux/udp.h>
+#include <linux/in.h>
+#include <linux/types.h>
 
 BPF_PERF_OUTPUT(events);
 BPF_HASH(rule_stats, __u32, __u64, 1000);
@@ -313,93 +308,80 @@ struct packet_event {
     __u32 sid;
 };
 
+// 安全读取 skb 内字节
 static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsigned char *out) {
     return bpf_skb_load_bytes(skb, off, out, 1);
 }
-
-char _license[] = "GPL";
 """
 
-    def compile_rules(self, rules, max_content_depth=8, max_inline_rules=20):
-        # 仅保留 attempted-recon
-        recon_rules = rules
+    def compile_rules(self, rules, max_content_depth=8):
+        """
+        rules 已经是 attempted-recon 类型
+        支持 content 为 str 或 list
+        """
+        parts = [self.header]
+        parts.append("int ids_filter(struct __sk_buff *skb) {")
+        parts.append("    unsigned char tmp = 0;")
 
-        if not recon_rules:
-            return self.header + "\nint ids_filter(struct __sk_buff *skb) { return 0; }\n"
+        for r in rules:
+            sid = int(r.get("sid", 0))
+            proto = int(r.get("protocol_num", 0) or 0)
+            dst_port = r.get("dst_port", None)
+            content = r.get("content", b"") or b""
 
-        # 限制内联规则数量
-        inline = recon_rules[:max_inline_rules]
-
-        code = [self.header, "int ids_filter(struct __sk_buff *skb) {", "    unsigned char tmp = 0;"]
-
-        for rule in inline:
-            sid = int(rule.get("sid", 0))
-            proto = int(rule.get("protocol_num", 0) or 0)
-            dst_port_cfg = rule.get("dst_port", None)
-            content = rule.get("content", b"") or b""
+            # 展平 content
             if isinstance(content, list):
-                content = content[0]  # 只取第一条 content
-            content_bytes = bytes(int(x, 16) for x in content.replace('|','').replace('"','').split()) if '|' in content else content.encode()
-            clen = min(len(content_bytes), max_content_depth)
+                content = b"".join([c.encode("latin1") if isinstance(c, str) else c for c in content])
+            elif isinstance(content, str):
+                content = content.encode("latin1")
 
-            code.append(f"    /* rule {sid} start */")
-            code.append("    do {")
+            # 截断 content 避免 verifier 报错
+            content = content[:max_content_depth]
+            clen = len(content)
 
-            # 读取 IP 协议字节
-            code.append("        unsigned char b0 = 0;")
-            code.append("        if (safe_load_byte(skb, 14, &b0) < 0) break;")
-            code.append("        unsigned int ihl = (b0 & 0x0f) * 4;")
-            code.append("        unsigned char proto_b = 0;")
-            code.append("        if (safe_load_byte(skb, 14 + 9, &proto_b) < 0) break;")
+            parts.append(f"    /* rule {sid} start */")
+            parts.append("    do {")
+
+            # 读取协议
+            parts.append("        unsigned char proto_b = 0;")
+            parts.append("        if (bpf_skb_load_bytes(skb, 23, &proto_b, 1) < 0) break;")  # IP header 9 + eth 14
             if proto != 0:
-                code.append(f"        if (proto_b != {proto}) break;")
+                parts.append(f"        if (proto_b != {proto}) break;")
 
-            # L4 偏移
-            code.append("        unsigned int l4_off = 14 + ihl;")
-
-            # 端口检查
-            if dst_port_cfg:
-                code.append("        unsigned char p0=0,p1=0;")
-                code.append("        if (safe_load_byte(skb, l4_off + 2, &p0) < 0) break;")
-                code.append("        if (safe_load_byte(skb, l4_off + 3, &p1) < 0) break;")
-                code.append("        unsigned short dst_port = (p0 << 8) | p1;")
-                if dst_port_cfg['type'] == 'single':
-                    code.append(f"        if (dst_port != {dst_port_cfg['port']}) break;")
-                elif dst_port_cfg['type'] == 'list':
-                    ports = dst_port_cfg['ports']
-                    cond = " && ".join([f"(dst_port != {p})" for p in ports])
-                    code.append(f"        if ({cond}) break;")
+            # dst port
+            if dst_port and isinstance(dst_port, dict) and dst_port.get("type") == "list":
+                ports = dst_port.get("ports", [])
+                if ports:
+                    parts.append("        unsigned char p0=0, p1=0;")
+                    parts.append("        if (bpf_skb_load_bytes(skb, 34, &p0, 1) < 0) break;")  # TCP start at 14+IP(20)
+                    parts.append("        if (bpf_skb_load_bytes(skb, 35, &p1, 1) < 0) break;")
+                    parts.append("        unsigned short dst_port = (p0 << 8) | p1;")
+                    ports_check = " && ".join([f"(dst_port != {p})" for p in ports])
+                    parts.append(f"        if ({ports_check}) break;")
             else:
-                code.append("        unsigned short dst_port = 0;")
+                parts.append("        unsigned short dst_port = 0;")
 
-            # payload content 比较
+            # payload content
             if clen > 0:
-                if proto == 6:
-                    # TCP
-                    code.append("        unsigned char tcp_hl=0;")
-                    code.append("        if (safe_load_byte(skb, l4_off + 12, &tcp_hl) < 0) break;")
-                    code.append("        unsigned int tcp_len = ((tcp_hl >> 4) & 0x0f) * 4;")
-                    code.append("        unsigned int payload_off = l4_off + tcp_len;")
-                elif proto == 17:
-                    code.append("        unsigned int payload_off = l4_off + 8;")
-                else:
-                    code.append("        unsigned int payload_off = l4_off;")
-                code.append("        unsigned char btmp=0;")
-                for i in range(clen):
-                    b = content_bytes[i]
-                    code.append(f"        if (safe_load_byte(skb, payload_off + {i}, &btmp) < 0) break;")
-                    code.append(f"        if (btmp != 0x{b:02x}) break;")
+                parts.append("        unsigned int payload_off = 14 + 20;")  # 简单固定 IP header 20B
+                parts.append("        unsigned char btmp = 0;")
+                for i, b in enumerate(content):
+                    parts.append(f"        if (bpf_skb_load_bytes(skb, payload_off + {i}, &btmp, 1) < 0) break;")
+                    parts.append(f"        if (btmp != 0x{b:02x}) break;")
 
-            # 命中：更新统计并提交事件
-            code.append(f"        {{ __u32 _k = {sid}; __u64 *_c = rule_stats.lookup(&_k); if (_c) (*_c)++; else {{ __u64 _i=1; rule_stats.update(&_k, &_i); }} }}")
-            code.append("        struct packet_event evt = {0};")
-            code.append("        evt.sid = %d;" % sid)
-            code.append("        evt.protocol = proto_b;")
-            code.append("        events.perf_submit(skb, &evt, sizeof(evt));")
-            code.append("        return 0;")
-            code.append("    } while(0);")
-            code.append(f"    /* rule {sid} end */")
+            # 命中规则 -> 更新统计 & 提交事件
+            parts.append(f"        __u32 _k = {sid};")
+            parts.append("        __u64 *_c = rule_stats.lookup(&_k);")
+            parts.append("        if (_c) (*_c)++; else { __u64 _i = 1; rule_stats.update(&_k, &_i); }")
 
-        code.append("    return 0;\n}")
-        return "\n".join(code)
+            # 构造事件（简单示例）
+            parts.append("        struct packet_event evt = {0};")
+            parts.append(f"        evt.sid = {sid}; evt.protocol = proto_b;")
+            parts.append("        events.perf_submit(skb, &evt, sizeof(evt));")
+            parts.append("        return 0;")
+            parts.append("    } while(0);")
+            parts.append(f"    /* rule {sid} end */")
 
+        parts.append("    return 0;")
+        parts.append("}")
+        return "\n".join(parts)
