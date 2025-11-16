@@ -375,23 +375,36 @@ class TCPRulesEBPFManager:
         }
     
     def export_code(self, output_file: str):
-       if not self.generated_code:
-         self.generate_all_code()
+        if not self.generated_code:
+            self.generate_all_code()
     
-       with open(output_file, 'w') as f:
-        # FIXED: Include correct kernel headers
-         f.write("""// Auto-generated eBPF code for TCP rule detection
-// Generated from Snort rules
+        # Ensure directory exists
+        output_dir = os.path.dirname(output_file)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+    
+        # Build header comment
+        header = "// Auto-generated eBPF code for TCP rule detection\n"
+        header += "// Generated from Snort rules\n"
+        header += "// This code requires Linux kernel 4.1+ with eBPF support\n\n"
+        header += "#include <uapi/linux/ptrace.h>\n"
+        header += "#include <uapi/linux/ip.h>\n"
+        header += "#include <uapi/linux/tcp.h>\n"
+        header += "#include <net/sock.h>\n"
+        header += "#include <bcc/proto.h>\n\n"
+    
+        # Combine all code into one string
+        all_code = header + "\n".join(self.generated_code)
+    
+        # Write ONCE to file
+        try:
+            with open(output_file, 'w') as f:
+                f.write(all_code)  # ← SINGLE write operation
+            print(f"✓ Successfully exported eBPF code to: {output_file}")
+        except Exception as e:
+            print(f"✗ Failed to export code: {e}")
+            raise
 
-#include <uapi/linux/ptrace.h>
-#include <uapi/linux/ip.h>      # ← NEW: For struct iphdr
-#include <uapi/linux/tcp.h>     # ← NEW: For struct tcphdr
-#include <net/sock.h>
-#include <bcc/proto.h>
-
-""")
-        
-       f.write("".join(self.generated_code))
 
     def export_metadata(self, output_file: str):
         """
