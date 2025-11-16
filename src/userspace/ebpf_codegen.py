@@ -11,6 +11,7 @@ import ipaddress
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
+
 @dataclass
 class PortSpec:
     """Represents a port specification"""
@@ -21,14 +22,17 @@ class PortSpec:
     ports: Optional[List[int]] = None
     variable_name: Optional[str] = None
 
+
 class TCPRuleEBPFCodegen:
     """
     Generates eBPF C code segments from parsed TCP Snort rules
     """
-    
+
     def __init__(self, rule_config: Dict[str, Any]):
         if rule_config.get("protocol_num") != 6:
-            raise ValueError(f"Only TCP rules supported (protocol_num=6), got {rule_config.get('protocol_num')}")
+            raise ValueError(
+                f"Only TCP rules supported (protocol_num=6), got {rule_config.get('protocol_num')}"
+            )
         self.rule = rule_config
         self.sid = rule_config.get("sid", 0)
         self.msg = rule_config.get("msg", "Unknown rule")
@@ -38,10 +42,17 @@ class TCPRuleEBPFCodegen:
 
     def generate_ebpf_code(self) -> str:
         """Generate complete eBPF C code segment for this rule"""
-        code_parts = []
+        code_parts: List[str] = []
+
+        # Comment header
         code_parts.append(self.generate_header_comment())
-        code_parts.append(self.generate_check_function())
+
+        # Define alert function before any use of alert_rule_<sid> in check_rule_<sid>
         code_parts.append(self.generate_alert_function())
+
+        # Now emit the check function that calls alert_rule_<sid>
+        code_parts.append(self.generate_check_function())
+
         return "\n".join(code_parts)
 
     def generate_header_comment(self) -> str:
@@ -88,86 +99,106 @@ class TCPRuleEBPFCodegen:
             "    if ((void *)(tcph + 1) > data_end) {",
             "        return 0;",
             "    }",
-            ""
+            "",
         ]
-        
+
         code_parts.append(self.generate_protocol_checks(func_name))
         code_parts.append(self.generate_port_checks())
-        
+
         if self.rule.get("tcp_flags"):
             code_parts.append(self.generate_flags_checks())
-        
+
         if self.rule.get("content"):
             code_parts.append(self.generate_content_checks())
-        
+
         code_parts.append("    /* All checks passed - trigger alert */")
-        code_parts.append(f"    alert_rule_{self.sid}(skb, iph->saddr, iph->daddr, tcph->source, tcph->dest);")
+        code_parts.append(
+            f"    alert_rule_{self.sid}(skb, iph->saddr, iph->daddr, tcph->source, tcph->dest);"
+        )
         code_parts.append("    return 1;")
         code_parts.append("}")
-        
+
         return "\n".join(code_parts)
 
     def generate_protocol_checks(self, func_name: str) -> str:
         """Generate IP/port validation checks"""
         checks = []
-        
+
         src_ip = self.rule.get("src_ip")
         if src_ip and src_ip != "any":
             checks.append(self.generate_ip_check("source", "iph->saddr", src_ip))
-        
+
         dst_ip = self.rule.get("dst_ip")
         if dst_ip and dst_ip != "any":
             checks.append(self.generate_ip_check("destination", "iph->daddr", dst_ip))
-        
+
         return "\n".join(checks)
 
     def generate_ip_check(self, direction: str, ip_var: str, ip_spec: str) -> str:
         """Generate IP address checking code"""
         if ip_spec.startswith("$"):
-            return f"    /* Variable IP check: {ip_spec} ({direction}) */\n"
-        
+            return (
+                f"    /* Variable IP check: {ip_spec} ({direction}) */\n"
+            )
+
         try:
             network = ipaddress.ip_network(ip_spec, strict=False)
             ip_int = int(network.network_address)
             mask_int = int(network.netmask)
-            
+
             code = f"    /* Check {direction} IP: {ip_spec} */\n"
             code += f"    u32 {direction}_net = htonl(0x{ip_int:08x});\n"
             code += f"    u32 {direction}_mask = htonl(0x{mask_int:08x});\n"
-            code += f"    if (({ip_var} & {direction}_mask) != ({direction}_net & {direction}_mask)) {{\n"
+            code += (
+                f"    if (({ip_var} & {direction}_mask) != "
+                f"({direction}_net & {direction}_mask)) {{\n"
+            )
             code += "        return 0;\n"
             code += "    }\n"
             return code
-        except:
+        except Exception:
             return f"    /* Unable to parse IP: {ip_spec} */\n"
 
     def generate_port_checks(self) -> str:
         """Generate port matching checks"""
         checks = []
-        
+
         src_port = self.rule.get("src_port")
         if src_port:
             checks.append(self.generate_port_check("src", "tcph->source", src_port))
-        
+
         dst_port = self.rule.get("dst_port")
         if dst_port:
             checks.append(self.generate_port_check("dst", "tcph->dest", dst_port))
-        
+
         return "\n".join(checks)
 
-    def generate_port_check(self, direction: str, port_var: str, port_spec: Dict[str, Any]) -> str:
+    def generate_port_check(
+        self, direction: str, port_var: str, port_spec: Dict[str, Any]
+    ) -> str:
         """Generate port matching code"""
         port_type = port_spec.get("type")
-        
+
         if port_type == "single":
             port = port_spec.get("port")
-            return f"    /* Check {direction} port: {port} */\n    if ({port_var} != htons({port})) {{\n        return 0;\n    }}\n"
-        
+            return (
+                f"    /* Check {direction} port: {port} */\n"
+                f"    if ({port_var} != htons({port})) {{\n"
+                f"        return 0;\n"
+                f"    }}\n"
+            )
+
         elif port_type == "range":
             start = port_spec.get("start", 0)
             end = port_spec.get("end", 65535)
-            return f"    /* Check {direction} port range: {start}-{end} */\n    u16 {direction}_port = ntohs({port_var});\n    if ({direction}_port < {start} || {direction}_port > {end}) {{\n        return 0;\n    }}\n"
-        
+            return (
+                f"    /* Check {direction} port range: {start}-{end} */\n"
+                f"    u16 {direction}_port = ntohs({port_var});\n"
+                f"    if ({direction}_port < {start} || {direction}_port > {end}) {{\n"
+                f"        return 0;\n"
+                f"    }}\n"
+            )
+
         elif port_type == "list":
             ports = port_spec.get("ports", [])
             valid_ports = []
@@ -178,18 +209,28 @@ class TCPRuleEBPFCodegen:
                     continue
                 if 1 <= p_int <= 1000:
                     valid_ports.append(p_int)
-            
+
             if not valid_ports:
-                return f"    /* No valid {direction} ports in list (1-1000), skipping port check */\n"
-            
+                return (
+                    f"    /* No valid {direction} ports in list (1-1000), skipping port check */\n"
+                )
+
             port_checks = [f"ntohs({port_var}) != {p}" for p in valid_ports]
             condition = " && ".join(port_checks)
-            return f"    /* Check {direction} port list: {valid_ports} */\n    if ({condition}) {{\n        return 0;\n    }}\n"
-        
+            return (
+                f"    /* Check {direction} port list: {valid_ports} */\n"
+                f"    if ({condition}) {{\n"
+                f"        return 0;\n"
+                f"    }}\n"
+            )
+
         elif port_type == "variable":
             var_name = port_spec.get("name", "UNKNOWN")
-            return f"    /* Variable port check: {var_name} ({direction}) - Port variables need runtime resolution */\n"
-        
+            return (
+                f"    /* Variable port check: {var_name} ({direction}) - "
+                f"Port variables need runtime resolution */\n"
+            )
+
         return f"    /* Unknown port type: {port_type} */\n"
 
     def generate_flags_checks(self) -> str:
@@ -197,10 +238,10 @@ class TCPRuleEBPFCodegen:
         flags = self.rule.get("tcp_flags", {})
         if not flags:
             return ""
-        
+
         checks = ["    /* Check TCP flags */"]
         flag_byte_checks = []
-        
+
         if flags.get("SYN"):
             flag_byte_checks.append("tcph->syn == 1")
         if flags.get("ACK"):
@@ -213,13 +254,13 @@ class TCPRuleEBPFCodegen:
             flag_byte_checks.append("tcph->psh == 1")
         if flags.get("URG"):
             flag_byte_checks.append("tcph->urg == 1")
-        
+
         if flag_byte_checks:
             flag_condition = " && ".join(flag_byte_checks)
             checks.append(f"    if (!({flag_condition})) {{")
             checks.append("        return 0;")
             checks.append("    }")
-        
+
         return "\n".join(checks)
 
     def generate_content_checks(self) -> str:
@@ -227,19 +268,19 @@ class TCPRuleEBPFCodegen:
         content = self.rule.get("content")
         if not content:
             return ""
-        
+
         checks = [
             "    /* Content matching (simplified) */",
             f"    /* Full pattern: {content} */",
-            "    /* Note: Complex content matching requires BPF string matching library */"
+            "    /* Note: Complex content matching requires BPF string matching library */",
         ]
         return "\n".join(checks)
 
     def generate_alert_function(self) -> str:
         """Generate the alert reporting function"""
         # Escape message for C string
-        safe_msg = self.msg.replace('"', '\\"').replace('\n', '\\n')[:255]
-        
+        safe_msg = self.msg.replace('"', '\\"').replace("\n", "\\n")[:255]
+
         code = f"""
 /* Alert function for rule {self.sid} */
 static __always_inline void alert_rule_{self.sid}(struct __sk_buff *skb, u32 src_ip, u32 dst_ip, u16 src_port, u16 dst_port) {{
@@ -283,13 +324,13 @@ static __always_inline void alert_rule_{self.sid}(struct __sk_buff *skb, u32 src
             "dst_ip": self.rule.get("dst_ip"),
             "dst_port": self.rule.get("dst_port"),
             "tcp_flags": self.rule.get("tcp_flags", {}),
-            "content": self.rule.get("content")
+            "content": self.rule.get("content"),
         }
 
 
 class TCPRulesEBPFManager:
     """Manager class for handling multiple TCP rules"""
-    
+
     def __init__(self):
         self.generators = []
         self.generated_code = []
@@ -311,7 +352,7 @@ class TCPRulesEBPFManager:
         """Generate eBPF C code for all added rules"""
         self.generated_code = []
         self.rule_metadata = []
-        
+
         for generator in self.generators:
             try:
                 code = generator.generate_ebpf_code()
@@ -319,22 +360,22 @@ class TCPRulesEBPFManager:
                 self.rule_metadata.append(generator.get_rule_metadata())
             except Exception as e:
                 print(f"Error generating code for rule {generator.sid}: {e}")
-        
+
         return {
             "code": "\n".join(self.generated_code),
             "metadata": self.rule_metadata,
-            "count": len(self.generated_code)
+            "count": len(self.generated_code),
         }
 
     def export_code(self, output_file: str):
         """Export generated code to C file with proper headers"""
         if not self.generated_code:
             self.generate_all_code()
-        
+
         output_dir = os.path.dirname(output_file)
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir, exist_ok=True)
-        
+
         # Build complete eBPF C program with perf buffer declaration
         header = """/*
  * Auto-generated eBPF code for TCP rule detection
@@ -342,12 +383,14 @@ class TCPRulesEBPFManager:
  * This code requires Linux kernel 4.1+ with eBPF support
  */
 
+
 #include <uapi/linux/ptrace.h>
 #include <uapi/linux/ip.h>
 #include <uapi/linux/tcp.h>
 #include <uapi/linux/if_ether.h>
 #include <net/sock.h>
 #include <bcc/proto.h>
+
 
 /* Alert event structure */
 struct alert_event {
@@ -360,11 +403,13 @@ struct alert_event {
     char msg[256];
 };
 
+
 /* Define perf buffer for alerts */
 BPF_PERF_OUTPUT(alerts);
 
+
 """
-        
+
         # Add main filter function that calls all rule checks
         main_function = """
 /* Main packet filter function */
@@ -374,20 +419,20 @@ int ids_filter(struct __sk_buff *skb) {
     
     /* Check all rules */
 """
-        
+
         # Add calls to each rule check function
         for generator in self.generators:
             main_function += f"    check_rule_{generator.sid}(skb, data, data_end);\n"
-        
+
         main_function += """    
     return 0;  /* Pass packet to network stack */
 }
 """
-        
+
         all_code = header + "\n".join(self.generated_code) + "\n" + main_function
-        
+
         try:
-            with open(output_file, 'w') as f:
+            with open(output_file, "w") as f:
                 f.write(all_code)
             print(f"✓ Successfully exported eBPF code to {output_file}")
         except Exception as e:
@@ -398,8 +443,8 @@ int ids_filter(struct __sk_buff *skb) {
         """Export rule metadata to JSON"""
         if not self.rule_metadata:
             self.generate_all_code()
-        
-        with open(output_file, 'w') as f:
+
+        with open(output_file, "w") as f:
             json.dump(self.rule_metadata, f, indent=2)
 
 
@@ -407,22 +452,22 @@ if __name__ == "__main__":
     # Example usage
     with open("snort_rules_ebpf.json", "r") as f:
         all_rules = json.load(f)
-    
+
     tcp_rules = [r for r in all_rules if r.get("protocol_num") == 6]
     print(f"Total rules: {len(all_rules)}")
     print(f"TCP rules: {len(tcp_rules)}")
-    
+
     manager = TCPRulesEBPFManager()
     for rule in tcp_rules[:5]:
         if manager.add_rule(rule):
             print(f"Added rule SID: {rule.get('sid')}")
-    
+
     result = manager.generate_all_code()
     print(f"\nGenerated code for {result['count']} rules")
-    
+
     manager.export_code("generated/tcp_rules.c")
     manager.export_metadata("generated/tcp_rules_metadata.json")
-    
+
     print("\nGenerated files:")
     print("  - generated/tcp_rules.c")
     print("  - generated/tcp_rules_metadata.json")
