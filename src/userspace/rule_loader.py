@@ -287,124 +287,120 @@ class RuleParser:
 
 
 class RuleCompiler:
+    """
+    动态生成 BCC eBPF C 代码，专门用于 attempted-recon 类型规则。
+    生成的 C 文件可以直接用 BPF.load_func("ids_filter", BPF.SOCKET_FILTER)
+    """
+
     def __init__(self):
-        pass
-
-    def compile_rules(self, rules):
-
-        if not rules:
-            return ""
-
-        code = []
-
-        # --- Header ---
-        code.append(r"""
+        # 头文件，仅保留 uapi 的最小集合
+        self.header = r"""
 #include <uapi/linux/bpf.h>
-#include <uapi/linux/in.h>
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
-#include <linux/tcp.h>
-#include <linux/udp.h>
+#include <uapi/linux/if_ether.h>
+#include <uapi/linux/ip.h>
+#include <uapi/linux/tcp.h>
+#include <uapi/linux/udp.h>
 
 BPF_PERF_OUTPUT(events);
+BPF_HASH(rule_stats, __u32, __u64, 1000);
 
-struct event_t {
-    u32 src_ip;
-    u32 dst_ip;
-    u16 src_port;
-    u16 dst_port;
-    u32 rule_id;
+struct packet_event {
+    __u32 src_ip;
+    __u32 dst_ip;
+    __u16 src_port;
+    __u16 dst_port;
+    __u8  protocol;
+    __u32 sid;
 };
 
-static __always_inline int match_rule(struct __sk_buff *skb, void *data, void *data_end, u32 sid)
-{
-    struct iphdr *ip = data + sizeof(struct ethhdr);
-    if ((void *)(ip + 1) > data_end)
-        return 0;
-
-    // Only IPv4
-    if (ip->version != 4)
-        return 0;
-
-    // Transport header
-    u8 *trans = (u8 *)ip + ip->ihl * 4;
-    if (trans >= (u8 *)data_end)
-        return 0;
-
-    struct event_t evt = {};
-    evt.src_ip = ip->saddr;
-    evt.dst_ip = ip->daddr;
-    evt.rule_id = sid;
-""")
-
-        # --- Rule blocks ---
-        for r in rules:
-            proto = r.get("protocol_num")
-            sid = r.get("sid", 0)
-            dst_ports = r.get("dst_port")
-
-            # 跳过无端口或无协议的规则（避免生成垃圾代码）
-            if proto not in (6, 17):  # TCP / UDP
-                continue
-            if not dst_ports:
-                continue
-            if dst_ports["type"] != "list":
-                continue
-
-            ports = dst_ports["ports"]
-            if not ports:
-                continue
-
-            code.append("    // Rule SID %d\n" % sid)
-
-            # protocol
-            code.append("    if (ip->protocol != %d) goto next_rule_%d;" % (proto, sid))
-
-            # tcp / udp header
-            if proto == 6:
-                code.append("    struct tcphdr *tcp = (void *)trans;")
-                code.append("    if ((void *)(tcp + 1) > data_end) return 0;")
-                code.append("    evt.src_port = tcp->source;")
-                code.append("    evt.dst_port = tcp->dest;")
-            else:
-                code.append("    struct udphdr *udp = (void *)trans;")
-                code.append("    if ((void *)(udp + 1) > data_end) return 0;")
-                code.append("    evt.src_port = udp->source;")
-                code.append("    evt.dst_port = udp->dest;")
-
-            # port match
-            port_checks = " || ".join([f"evt.dst_port == bpf_htons({p})" for p in ports])
-            code.append(f"    if (!({port_checks})) goto next_rule_{sid};")
-
-            # matched
-            code.append("    events.perf_submit_skb(skb, skb->len, &evt, sizeof(evt));")
-            code.append("    return 0;")
-
-            code.append(f"next_rule_{sid}: ;\n")
-
-        # --- End function ---
-        code.append("    return 0;\n")
-
-        # --- Entry program ---
-        code.append(r"""
-SEC("socket")
-int ids_filter(struct __sk_buff *skb)
-{
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
-        return 0;
-
-    if (eth->h_proto != bpf_htons(ETH_P_IP))
-        return 0;
-
-    return match_rule(skb, data, data_end, 0);
+static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsigned char *out) {
+    return bpf_skb_load_bytes(skb, off, out, 1);
 }
 
-char _license[] SEC("license") = "GPL";
-""")
+char _license[] = "GPL";
+"""
 
+    def compile_rules(self, rules, max_content_depth=8, max_inline_rules=20):
+        # 仅保留 attempted-recon
+        recon_rules = [r for r in rules if r.get("classtype") == "attempted-recon"]
+        print(f"✓ 共筛选出 {len(recon_rules)} 条 attempted-recon 规则")
+
+        if not recon_rules:
+            return self.header + "\nint ids_filter(struct __sk_buff *skb) { return 0; }\n"
+
+        # 限制内联规则数量
+        inline = recon_rules[:max_inline_rules]
+
+        code = [self.header, "int ids_filter(struct __sk_buff *skb) {", "    unsigned char tmp = 0;"]
+
+        for rule in inline:
+            sid = int(rule.get("sid", 0))
+            proto = int(rule.get("protocol_num", 0) or 0)
+            dst_port_cfg = rule.get("dst_port", None)
+            content = rule.get("content", b"") or b""
+            if isinstance(content, list):
+                content = content[0]  # 只取第一条 content
+            content_bytes = bytes(int(x, 16) for x in content.replace('|','').replace('"','').split()) if '|' in content else content.encode()
+            clen = min(len(content_bytes), max_content_depth)
+
+            code.append(f"    /* rule {sid} start */")
+            code.append("    do {")
+
+            # 读取 IP 协议字节
+            code.append("        unsigned char b0 = 0;")
+            code.append("        if (safe_load_byte(skb, 14, &b0) < 0) break;")
+            code.append("        unsigned int ihl = (b0 & 0x0f) * 4;")
+            code.append("        unsigned char proto_b = 0;")
+            code.append("        if (safe_load_byte(skb, 14 + 9, &proto_b) < 0) break;")
+            if proto != 0:
+                code.append(f"        if (proto_b != {proto}) break;")
+
+            # L4 偏移
+            code.append("        unsigned int l4_off = 14 + ihl;")
+
+            # 端口检查
+            if dst_port_cfg:
+                code.append("        unsigned char p0=0,p1=0;")
+                code.append("        if (safe_load_byte(skb, l4_off + 2, &p0) < 0) break;")
+                code.append("        if (safe_load_byte(skb, l4_off + 3, &p1) < 0) break;")
+                code.append("        unsigned short dst_port = (p0 << 8) | p1;")
+                if dst_port_cfg['type'] == 'single':
+                    code.append(f"        if (dst_port != {dst_port_cfg['port']}) break;")
+                elif dst_port_cfg['type'] == 'list':
+                    ports = dst_port_cfg['ports']
+                    cond = " && ".join([f"(dst_port != {p})" for p in ports])
+                    code.append(f"        if ({cond}) break;")
+            else:
+                code.append("        unsigned short dst_port = 0;")
+
+            # payload content 比较
+            if clen > 0:
+                if proto == 6:
+                    # TCP
+                    code.append("        unsigned char tcp_hl=0;")
+                    code.append("        if (safe_load_byte(skb, l4_off + 12, &tcp_hl) < 0) break;")
+                    code.append("        unsigned int tcp_len = ((tcp_hl >> 4) & 0x0f) * 4;")
+                    code.append("        unsigned int payload_off = l4_off + tcp_len;")
+                elif proto == 17:
+                    code.append("        unsigned int payload_off = l4_off + 8;")
+                else:
+                    code.append("        unsigned int payload_off = l4_off;")
+                code.append("        unsigned char btmp=0;")
+                for i in range(clen):
+                    b = content_bytes[i]
+                    code.append(f"        if (safe_load_byte(skb, payload_off + {i}, &btmp) < 0) break;")
+                    code.append(f"        if (btmp != 0x{b:02x}) break;")
+
+            # 命中：更新统计并提交事件
+            code.append(f"        {{ __u32 _k = {sid}; __u64 *_c = rule_stats.lookup(&_k); if (_c) (*_c)++; else {{ __u64 _i=1; rule_stats.update(&_k, &_i); }} }}")
+            code.append("        struct packet_event evt = {0};")
+            code.append("        evt.sid = %d;" % sid)
+            code.append("        evt.protocol = proto_b;")
+            code.append("        events.perf_submit(skb, &evt, sizeof(evt));")
+            code.append("        return 0;")
+            code.append("    } while(0);")
+            code.append(f"    /* rule {sid} end */")
+
+        code.append("    return 0;\n}")
         return "\n".join(code)
+
