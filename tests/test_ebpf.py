@@ -4,131 +4,102 @@ from datetime import datetime
 import socket
 import struct
 
-# eBPF program code
+# eBPF program using Socket Filter (compatible with virtio_net)
 bpf_text = """
 #include <uapi/linux/ptrace.h>
 #include <net/sock.h>
 #include <bcc/proto.h>
-#include <linux/ip.h>
-#include <linux/tcp.h>
 
-// Structure to store scan events
 struct scan_event_t {
     u32 saddr;
     u32 daddr;
     u16 sport;
     u16 dport;
-    u8 flags;
 };
 
-// Hash map to count SYN packets per source IP
-BPF_HASH(syn_count, u32, u64);
+BPF_HASH(syn_tracker, u32, u64);
+BPF_PERF_OUTPUT(scan_alerts);
 
-// Perf event array to send alerts to userspace
-BPF_PERF_OUTPUT(events);
-
-// XDP program to detect port scans
-int detect_scan(struct xdp_md *ctx) {
-    void *data_end = (void *)(long)ctx->data_end;
-    void *data = (void *)(long)ctx->data;
+int detect_port_scan(struct __sk_buff *skb) {
+    u8 *cursor = 0;
     
-    // Parse Ethernet header
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
-        return XDP_PASS;
+    struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
+    if (ethernet->type != ETH_P_IP)
+        return 0;
     
-    // Check if IP packet
-    if (eth->h_proto != htons(ETH_P_IP))
-        return XDP_PASS;
+    struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
+    if (ip->nextp != IPPROTO_TCP)
+        return 0;
     
-    // Parse IP header
-    struct iphdr *ip = data + sizeof(*eth);
-    if ((void *)(ip + 1) > data_end)
-        return XDP_PASS;
+    struct tcp_t *tcp = cursor_advance(cursor, sizeof(*tcp));
     
-    // Check if TCP packet
-    if (ip->protocol != IPPROTO_TCP)
-        return XDP_PASS;
-    
-    // Parse TCP header
-    struct tcphdr *tcp = (void *)ip + sizeof(*ip);
-    if ((void *)(tcp + 1) > data_end)
-        return XDP_PASS;
-    
-    // Detect SYN scan (SYN flag set, ACK flag not set)
-    if (tcp->syn && !tcp->ack) {
-        u32 saddr = ip->saddr;
-        u64 *count = syn_count.lookup(&saddr);
-        u64 new_count = 1;
+    // Detect SYN scans (SYN flag set, ACK flag not set)
+    if (tcp->flag_syn == 1 && tcp->flag_ack == 0) {
+        u32 src_ip = ip->src;
+        u64 *scan_count = syn_tracker.lookup(&src_ip);
+        u64 count = 1;
         
-        if (count) {
-            new_count = *count + 1;
+        if (scan_count) {
+            count = *scan_count + 1;
         }
+        syn_tracker.update(&src_ip, &count);
         
-        syn_count.update(&saddr, &new_count);
-        
-        // Alert if more than 10 SYN packets from same source
-        if (new_count > 10) {
-            struct scan_event_t evt = {};
-            evt.saddr = ip->saddr;
-            evt.daddr = ip->daddr;
-            evt.sport = ntohs(tcp->source);
-            evt.dport = ntohs(tcp->dest);
-            evt.flags = ((u8 *)tcp)[13];
+        // Alert after 15 SYN packets from same source
+        if (count > 15) {
+            struct scan_event_t alert = {};
+            alert.saddr = ip->src;
+            alert.daddr = ip->dst;
+            alert.sport = tcp->src_port;
+            alert.dport = tcp->dst_port;
             
-            events.perf_submit(ctx, &evt, sizeof(evt));
+            scan_alerts.perf_submit(skb, &alert, sizeof(alert));
         }
     }
     
-    return XDP_PASS;
+    return 0;
 }
 """
 
-# Callback function to handle events
-def print_event(cpu, data, size):
-    event = b["events"].event(data)
+def handle_alert(cpu, data, size):
+    event = b["scan_alerts"].event(data)
+    src = socket.inet_ntoa(struct.pack("I", event.saddr))
+    dst = socket.inet_ntoa(struct.pack("I", event.daddr))
     
-    # Convert IP addresses to readable format
-    src_ip = socket.inet_ntoa(struct.pack("I", event.saddr))
-    dst_ip = socket.inet_ntoa(struct.pack("I", event.daddr))
-    
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    
-    print(f"\n{'='*70}")
-    print(f"[ALERT] Port Scan Detected at {timestamp}")
-    print(f"{'='*70}")
-    print(f"Source IP:      {src_ip}")
-    print(f"Source Port:    {event.sport}")
-    print(f"Target IP:      {dst_ip}")
-    print(f"Target Port:    {event.dport}")
-    print(f"TCP Flags:      0x{event.flags:02x}")
-    print(f"{'='*70}\n")
+    print(f"\n{'*'*70}")
+    print(f"[INTRUSION ALERT] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'*'*70}")
+    print(f"⚠️  Suspicious Port Scan Detected!")
+    print(f"Attacker IP:  {src}:{event.sport}")
+    print(f"Target IP:    {dst}:{event.dport}")
+    print(f"Scan Type:    SYN Scan (Stealth)")
+    print(f"{'*'*70}\n")
 
-# Load BPF program
-print("[*] Loading eBPF program...")
-b = BPF(text=bpf_text)
+print("[*] Initializing eBPF Port Scan Detection System...")
+print("[*] Mode: Socket Filter (compatible with Google Cloud VMs)")
 
-# Get network interface (modify as needed)
-interface = "eth0"  # Change to your interface name (use 'ip link show' to find it)
+# Suppress compiler warnings
+cflags = ["-Wno-macro-redefined"]
+b = BPF(text=bpf_text, cflags=cflags)
+
+# Google Cloud VM interface
+interface = "ens4"
 
 print(f"[*] Attaching eBPF program to interface: {interface}")
-fn = b.load_func("detect_scan", BPF.XDP)
-b.attach_xdp(interface, fn, 0)
+function_name = b.load_func("detect_port_scan", BPF.SOCKET_FILTER)
+BPF.attach_raw_socket(function_name, interface)
 
-print("[✓] eBPF program successfully deployed!")
+print("[✓] eBPF Program Successfully Deployed!")
+print("[✓] Detection System Active and Monitoring")
 print(f"[*] Monitoring interface {interface} for port scans...")
-print("[*] Press Ctrl+C to stop\n")
+print("[*] Threshold: Alert after 15+ SYN packets from same source")
+print("[*] Press Ctrl+C to terminate\n")
 
-# Open perf buffer
-b["events"].open_perf_buffer(print_event)
+b["scan_alerts"].open_perf_buffer(handle_alert)
 
-# Poll for events
 try:
     while True:
         b.perf_buffer_poll()
 except KeyboardInterrupt:
-    print("\n[*] Detaching eBPF program...")
-
-# Cleanup
-b.remove_xdp(interface, 0)
-print("[✓] eBPF program detached successfully")
+    print("\n[*] Shutting down detection system...")
+    print("[✓] eBPF program detached successfully")
+    print("[✓] Monitoring terminated")
