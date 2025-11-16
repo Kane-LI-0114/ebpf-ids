@@ -382,7 +382,7 @@ class IDSManager:
         if not os.path.isfile(udp_c_path):
             raise FileNotFoundError(f"未找到生成的 eBPF 内核代码: {udp_c_path}")
 
-        with open(TCP_RULES_C_PATH, "r") as f:
+        with open(udp_c_path, "r") as f:
             kernel_code = f.read()
 
         try:
