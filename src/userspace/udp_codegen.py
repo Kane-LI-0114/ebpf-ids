@@ -77,8 +77,7 @@ class UDPRulesEBPFManager:
 
     def _generate_header(self) -> str:
        """Generate BPF header includes and definitions"""
-       return """#include <linux/bpf.h>
-#include <linux/if_ether.h>
+       return """#include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
@@ -96,8 +95,8 @@ struct alert_event {
     char msg[256];
 };
 
-BPF_PERF_OUTPUT(alert_events);"""
-
+BPF_PERF_OUTPUT(alert_events);
+"""
 
     def _generate_data_structures(self) -> str:
         """Generate BPF maps for rule storage"""
