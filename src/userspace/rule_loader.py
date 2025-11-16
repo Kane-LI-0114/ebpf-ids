@@ -437,8 +437,8 @@ struct packet_event {
 
             # 端口检查
             parts.append(f"        if (dst_port_val != bpf_htons({dst_port})) break;")
-            # if src_port_val is not None:
-            #     parts.append(f"        if (src_port_val != bpf_htons({src_port_val})) break;")
+            if src_port_val is not None and src_port_val != 0:
+                parts.append(f"        if (src_port_val != bpf_htons({src_port_val})) break;")
 
             # 更新统计
             parts.append(f"        __u32 _k = {sid};")
