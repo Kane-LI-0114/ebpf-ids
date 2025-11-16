@@ -12,6 +12,8 @@ eBPF IDS 用户空间管理程序
 """
 
 import os
+from udp_codegen import UDPRulesEBPFManager
+
 from pathlib import Path
 import sys
 import json
@@ -296,6 +298,7 @@ class IDSManager:
     def __init__(self):
         self.bpf: Optional[BPF] = None
         self.tcp_rules_manager = TCPRulesEBPFManager()
+        self.udp_rules_manager = UDPRulesEBPFManager()
 
         # 用 RuleManager 只做“规则元数据 + sid_to_rule 映射”
         self.rule_manager = RuleManager(rules_dir=PROJECT_ROOT)
@@ -343,6 +346,31 @@ class IDSManager:
         print(f"✓ 已导出规则元数据到: {TCP_RULES_META_PATH}")
 
     # ----------------------- eBPF 编译、加载、挂载 -----------------------
+    # Add methods for UDP rule handling
+    def load_udp_rules(self, json_path: str = SNORT_RULES_JSON):
+       with open(json_path, "r") as f:
+         all_rules = json.load(f)
+
+       udp_count = 0
+       for rule in all_rules:
+          if rule.get("protocol_num") == 17:
+             if self.udp_rules_manager.add_rule(rule):
+                  udp_count += 1
+       print(f"✓ 已加载 {udp_count} 条 UDP 规则")
+       return udp_count
+    def generate_udp_rules_code(self):
+        print("Generating UDP rules eBPF code...")
+        result = self.udp_rules_manager.generate_all_code()
+
+    # Export to kernel directory
+        udp_c_path = os.path.join(KERNEL_DIR, "udp_rules.c")
+        udp_meta_path = os.path.join(KERNEL_DIR, "udp_rules_metadata.json")
+
+        self.udp_rules_manager.export_code(udp_c_path)
+        self.udp_rules_manager.export_metadata(udp_meta_path)
+
+        print(f"✓ Generated {result['count']} UDP rules")
+        return result
 
     def load_ebpf_program(self):
         """编译和加载 eBPF 程序，并作为 socket filter 挂载到接口"""
@@ -430,11 +458,9 @@ class IDSManager:
             # 1. 解析原始 Snort 规则，用于 EventHandler 的 sid_to_rule 映射
             self.rule_manager.load_rules()
 
-            # 2. 从 JSON 加载规则到 eBPF 代码生成器
-            self.load_rules_for_codegen()
-
-            # 3. 生成 C 代码并导出到内核目录
-            self.generate_tcp_rules_code()
+           # Add UDP rule loading
+            self.load_udp_rules()
+            self.generate_udp_rules_code()
 
             # 4. 编译、加载并挂载 eBPF 程序
             self.load_ebpf_program()
