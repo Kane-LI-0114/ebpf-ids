@@ -328,7 +328,7 @@ class IDSManager:
         self.event_handler = None
         self.running = False
 
-    def filter_rules(rules):
+    def filter_rules(self, rules):
         filtered = []
 
         for rule in rules:
@@ -379,9 +379,9 @@ class IDSManager:
             # recon_rules = [r for r in rules if r.get("classtype") == "attempted-recon"][:20]
             print(f"✓ 共筛选出 {len(filtered_rules)} 条 attempted-recon 规则")
 
-            if not recon_rules:
-                print("⚠ 没有 attempted-recon 类型规则，跳过 eBPF 编译")
-                return False
+            # if not recon_rules:
+            #     print("⚠ 没有 attempted-recon 类型规则，跳过 eBPF 编译")
+            #     return False
 
             # 2️⃣ 动态生成 eBPF C 代码
             compiler = RuleCompiler()
