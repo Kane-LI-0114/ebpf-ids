@@ -220,54 +220,55 @@ static __always_inline void send_alert(struct __sk_buff *skb, u32 sid,
         return "\n".join(code)
 
     def _generate_main_function(self) -> str:
-        """Generate the main BPF filter function"""
-        return """// Main UDP IDS filter function
-int ids_filter(struct __sk_buff *skb) {
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-
+       """Generate the main BPF filter function"""
+       return """// Main UDP IDS filter function (XDP mode)
+int ids_filter(struct xdp_md *ctx) {
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+    
     // Parse Ethernet header
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) {
-        return 0;
+        return XDP_PASS;
     }
-
+    
     // Check if IP packet
     if (eth->h_proto != __constant_htons(ETH_P_IP)) {
-        return 0;
+        return XDP_PASS;
     }
-
+    
     // Parse IP header
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end) {
-        return 0;
+        return XDP_PASS;
     }
-
+    
     // Check if UDP
     if (ip->protocol != IPPROTO_UDP) {
-        return 0;
+        return XDP_PASS;
     }
-
+    
     // Parse UDP header
     struct udphdr *udp = (void *)ip + (ip->ihl * 4);
     if ((void *)(udp + 1) > data_end) {
-        return 0;
+        return XDP_PASS;
     }
-
+    
     // Extract packet info
     u32 src_ip = ip->saddr;
     u32 dst_ip = ip->daddr;
     u16 src_port = __constant_ntohs(udp->source);
     u16 dst_port = __constant_ntohs(udp->dest);
-
+    
     // Payload starts after UDP header
     void *payload = (void *)(udp + 1);
-
+    
     // Check against UDP rules
-    check_udp_rules(skb, src_ip, dst_ip, src_port, dst_port, payload, data_end);
-
-    return 0;  // Always accept packet (monitoring mode)
+    check_udp_rules(ctx, src_ip, dst_ip, src_port, dst_port, payload, data_end);
+    
+    return XDP_PASS; // Always accept packet (monitoring mode)
 }"""
+
 
     def export_code(self, output_path: str):
         """Export generated code to file"""
