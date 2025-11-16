@@ -332,19 +332,23 @@ class IDSManager:
         filtered = []
 
         for rule in rules:
-
-            # 1) 只保留 attempted-recon
+            # 1) attempted-recon
             if rule.get("classtype") != "attempted-recon":
                 continue
 
-            # 2) 只保留 dst_port 为 single 的规则
+            # 2) dst_port 是 tuple：(ptype, p1, p2)
             dp = rule.get("dst_port")
-            if not dp or dp.get("type") != "single":
+            if not isinstance(dp, tuple) or len(dp) != 3:
                 continue
 
-            # 3) 校验端口合法性
-            port = dp.get("port")
-            if not isinstance(port, int) or not (1 <= port <= 65535):
+            ptype, p1, p2 = dp
+
+            # 只允许 single
+            if ptype != 1:
+                continue
+
+            # p1 是端口号
+            if not (1 <= p1 <= 65535):
                 continue
 
             filtered.append(rule)
