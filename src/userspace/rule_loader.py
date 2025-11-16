@@ -317,7 +317,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
     def compile_rules(self, rules):
         """
         仅根据 src_ip, src_port, dst_ip, dst_port, protocol 进行匹配
-        rules: attempted-recon + single dst_port
+        rules 保证全部是 dst_port = single 的规则
         """
         parts = [self.header]
         parts.append("int ids_filter(struct __sk_buff *skb) {")
@@ -326,7 +326,9 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
         for r in rules:
             sid = int(r.get("sid", 0))
             proto = int(r.get("protocol_num", 0) or 0)
-            dst_port = r.get("dst_port", None)
+
+            # ★ 直接取 single port，不再做类型判断
+            port = r["dst_port"]["port"]
 
             parts.append(f"    /* rule {sid} start */")
             parts.append("    do {")
@@ -342,7 +344,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
             parts.append("        struct iphdr iph = {};")
             parts.append("        if (bpf_skb_load_bytes(skb, 14, &iph, sizeof(iph)) < 0) break;")
 
-            # ------- IP checks (all optional) --------
+            # ------- IP checks (optional) --------
             if r.get("src_ip"):
                 parts.append(f"        if (iph.saddr != {r['src_ip']}) break;")
 
@@ -366,11 +368,10 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
             parts.append("            dst_port_val = uh.dest;")
             parts.append("        }")
 
-            # ------- Port checks -------
-            if dst_port and dst_port.get("type") == "single":
-                port = dst_port["port"]
-                parts.append(f"        if (dst_port_val != {port}) break;")
+            # ------- ★ Only compare single dst_port -------
+            parts.append(f"        if (dst_port_val != {port}) break;")
 
+            # optional src_port
             if r.get("src_port"):
                 parts.append(f"        if (src_port_val != {r['src_port']}) break;")
 
