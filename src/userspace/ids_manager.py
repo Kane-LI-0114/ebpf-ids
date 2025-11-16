@@ -375,7 +375,7 @@ class IDSManager:
                 return False
 
             # 1.1️⃣ 快速筛选 attempted-recon
-            filtered_rules = filter_rules(rules)
+            filtered_rules = self.filter_rules(rules)
             # recon_rules = [r for r in rules if r.get("classtype") == "attempted-recon"][:20]
             print(f"✓ 共筛选出 {len(filtered_rules)} 条 attempted-recon 规则")
 
