@@ -197,14 +197,13 @@ class EventHandler:
 
         class PacketEvent(ct.Structure):
             _fields_ = [
-                ("src_ip", ct.c_uint32),
-                ("dst_ip", ct.c_uint32),
-                ("src_port", ct.c_uint16),
-                ("dst_port", ct.c_uint16),
-                ("protocol", ct.c_uint8),
-                ("sid", ct.c_uint32),  # 确保这个字段存在且位置正确
-                ("payload_len", ct.c_uint32),
-                ("payload", ct.c_ubyte * 256),
+                ("src_ip", ct.c_uint32),  # 4
+                ("dst_ip", ct.c_uint32),  # 4
+                ("src_port", ct.c_uint16),  # 2
+                ("dst_port", ct.c_uint16),  # 2
+                ("protocol", ct.c_uint8),  # 1
+                ("_pad", ct.c_ubyte * 3),  # 3 padding 对齐
+                ("sid", ct.c_uint32),  # 4
             ]
 
         try:
@@ -214,26 +213,6 @@ class EventHandler:
 
             event = ct.cast(data, ct.POINTER(PacketEvent)).contents
             self.event_count += 1
-
-            # 详细调试信息 - 每10个事件输出一次
-            # if self.event_count % 10 == 0:
-            #     src_ip = self.format_ip(event.src_ip)
-            #     dst_ip = self.format_ip(event.dst_ip)
-            #     protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
-            #     protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
-            #
-            #     print(f"[调试] 事件 #{self.event_count}")
-            #     print(f"      SID: {event.sid}")
-            #     print(f"      协议: {protocol_name}")
-            #     print(f"      源: {src_ip}:{event.src_port}")
-            #     print(f"      目标: {dst_ip}:{event.dst_port}")
-            #
-            #     # 检查规则查找
-            #     matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
-            #     if matched_rule:
-            #         print(f"      找到规则: {matched_rule['msg'][:30]}...")
-            #     else:
-            #         print(f"      ❌ 未找到规则 SID={event.sid}")
 
             # 正常的事件处理逻辑
             matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
