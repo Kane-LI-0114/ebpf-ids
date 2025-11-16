@@ -375,23 +375,24 @@ class TCPRulesEBPFManager:
         }
     
     def export_code(self, output_file: str):
-        """
-        Export generated code to a file
-        
-        Args:
-            output_file: Path to output C source file
-        """
-        if not self.generated_code:
-            self.generate_all_code()
-        
-        with open(output_file, 'w') as f:
-            f.write("// Auto-generated eBPF code for TCP rule detection\n")
-            f.write("// Generated from Snort rules\n\n")
-            f.write("#include <uapi/linux/ptrace.h>\n")
-            f.write("#include <net/sock.h>\n")
-            f.write("#include <bcc/proto.h>\n\n")
-            f.write("".join(self.generated_code))
+       if not self.generated_code:
+         self.generate_all_code()
     
+       with open(output_file, 'w') as f:
+        # FIXED: Include correct kernel headers
+         f.write("""// Auto-generated eBPF code for TCP rule detection
+// Generated from Snort rules
+
+#include <uapi/linux/ptrace.h>
+#include <uapi/linux/ip.h>      # ← NEW: For struct iphdr
+#include <uapi/linux/tcp.h>     # ← NEW: For struct tcphdr
+#include <net/sock.h>
+#include <bcc/proto.h>
+
+""")
+        
+       f.write("".join(self.generated_code))
+
     def export_metadata(self, output_file: str):
         """
         Export rule metadata to JSON
