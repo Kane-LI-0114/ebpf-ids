@@ -256,151 +256,150 @@ class EventHandler:
             "total_events": self.event_count,
             "total_alerts": self.alert_count
         }
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+IDS Manager for eBPF-based TCP rule engine.
+
+- Loads parsed Snort TCP rules from JSON.
+- Uses TCPRulesEBPFManager to generate eBPF C code and metadata.
+- Compiles and loads the eBPF program via BCC.
+"""
+
+import os
+import sys
+import json
+from bcc import BPF
+
+from ebpf_codegen import TCPRulesEBPFManager
+
+
+# -----------------------------------------------------------------------------
+# Path configuration (FIX: avoid extremely long, repeated paths)
+# -----------------------------------------------------------------------------
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Assuming this file lives at: <project_root>/src/userspace/ebpf-ids/ids_manager.py
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
+KERNEL_DIR = os.path.join(PROJECT_ROOT, "src", "kernel")
+USERSAPCE_DIR = os.path.join(PROJECT_ROOT, "src", "userspace", "ebpf-ids")
+
+TCP_RULES_C_PATH = os.path.join(KERNEL_DIR, "tcp_rules.c")
+TCP_RULES_META_PATH = os.path.join(KERNEL_DIR, "tcp_rules_metadata.json")
+
+# Example rules JSON location; adjust to your actual path
+SNORT_RULES_JSON = os.path.join(PROJECT_ROOT, "snort_rules_ebpf.json")
 
 
 class IDSManager:
-    """IDS 主管理类"""
-    def __init__(self, rules_dir, interface=None):
-        self.rules_dir = rules_dir
-        if interface is None:
-            self.interface = get_active_interface()
-        else:
-            self.interface = interface
+    def __init__(self):
         self.bpf = None
-        self.rule_manager = RuleManager(rules_dir)
-        self.event_handler = None
-        self.project_root = Path(__file__).resolve().parents[2]
-        self.default_rule_file = self.project_root / "snort3-community.rules"
+        self.tcp_rules_manager = TCPRulesEBPFManager()
+
+    # -------------------------------------------------------------------------
+    # Rule loading and codegen
+    # -------------------------------------------------------------------------
+
+    def load_rules(self, json_path: str = SNORT_RULES_JSON):
+        """Load parsed Snort rules from JSON and add TCP rules to the codegen."""
+        print("初始化 eBPF IDS 系统...")
+
+        if not os.path.isfile(json_path):
+            raise FileNotFoundError(f"规则文件未找到: {json_path}")
+
+        with open(json_path, "r") as f:
+            all_rules = json.load(f)
+
+        tcp_rules = [r for r in all_rules if r.get("protocol_num") == 6]
+
+        print(f"✓ 已加载 {len(tcp_rules)} 条 TCP 规则到代码生成器")
+
+        for rule in tcp_rules:
+            added = self.tcp_rules_manager.add_rule(rule)
+            if not added:
+                # 非 TCP 规则或解析失败
+                continue
+
+    def generate_tcp_rules_code(self):
+        """Generate eBPF C code for all TCP rules and export to kernel src dir."""
+        print("正在生成 TCP 规则的 eBPF 代码...")
+        result = self.tcp_rules_manager.generate_all_code()
+        print(f"✓ 已生成 {result['count']} 条 TCP 规则的 eBPF 代码")
+
+        # Ensure kernel directory exists
+        os.makedirs(KERNEL_DIR, exist_ok=True)
+
+        # Export code and metadata to short, stable paths
+        self.tcp_rules_manager.export_code(TCP_RULES_C_PATH)
+        print(f"✓ 已导出 eBPF 代码到: {TCP_RULES_C_PATH}")
+
+        self.tcp_rules_manager.export_metadata(TCP_RULES_META_PATH)
+        print(f"✓ 已导出规则元数据到: {TCP_RULES_META_PATH}")
+
+    # -------------------------------------------------------------------------
+    # eBPF program compilation and loading
+    # -------------------------------------------------------------------------
 
     def load_ebpf_program(self):
+        """Compile and load the generated eBPF program using BCC."""
+        print("正在编译 eBPF 程序...")
+
+        # Read generated kernel code
+        if not os.path.isfile(TCP_RULES_C_PATH):
+            raise FileNotFoundError(f"未找到生成的 eBPF 内核代码: {TCP_RULES_C_PATH}")
+
+        with open(TCP_RULES_C_PATH, "r") as f:
+            kernel_code = f.read()
+
         try:
-            print("正在生成 TCP 规则的 eBPF 代码...")
-            result = self.rule_manager.tcp_codegen.generate_all_code()
-            print(f"✓ 已生成 {result['count']} 条 TCP 规则的 eBPF 代码")
-            
-            kernel_code_path = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)),
-                "kernel",
-                "tcp_rules.c"
-            )
-            
-            self.rule_manager.tcp_codegen.export_code(kernel_code_path)
-            print(f"✓ 已导出 eBPF 代码到: {kernel_code_path}")
-            
-            metadata_path = kernel_code_path.replace(".c", "_metadata.json")
-            self.rule_manager.tcp_codegen.export_metadata(metadata_path)
-            print(f"✓ 已导出规则元数据到: {metadata_path}")
-            
-            with open(kernel_code_path, 'r') as f:
-                kernel_code = f.read()
-            
-            print("正在编译 eBPF 程序...")
-            from bcc import BPF
+            # FIX: ensure cwd is a short path so getcwd() inside BCC/Clang does not
+            # hit PATH_MAX and return ERANGE ("Numerical result out of range").
+            os.chdir(PROJECT_ROOT)
+
+            # Compile BPF from text
             self.bpf = BPF(text=kernel_code)
-            print("✓ eBPF 程序编译成功")
-            return True
-            
+
+            # Attach XDP / TC / kprobe, etc., according to your design.
+            # Example (XDP on interface eth0):
+            # fn = self.bpf.load_func("ids_filter", BPF.XDP)
+            # BPF.attach_xdp("eth0", fn, 0)
+
+            print("✓ eBPF 程序编译并加载成功")
         except Exception as e:
+            print("getcwd:", os.getcwd())
             print(f"✗ 加载 eBPF 程序失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+            raise
 
-    def attach_probes(self):
-        """附加探针到网络接口"""
+    # -------------------------------------------------------------------------
+    # High-level orchestration
+    # -------------------------------------------------------------------------
+
+    def init_ids(self):
+        """High-level initialization sequence."""
         try:
-            print(f"附加 eBPF 程序到网络接口: {self.interface}")
-            # Uncomment and implement actual attachment
-            # function_ids_filter = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
-            # BPF.attach_raw_socket(function_ids_filter, self.interface)
-            print(f"✓ 已附加到 {self.interface}")
-            return True
+            self.load_rules()
+            self.generate_tcp_rules_code()
+            self.load_ebpf_program()
+            print("✓ IDS 初始化完成")
         except Exception as e:
-            print(f"✗ 附加探针失败: {e}")
-            print(f"提示: 请确保网络接口 '{self.interface}' 存在")
-            print(f"可用接口列表: 运行 'ip link show' 查看")
-            return False
-
-    def initialize(self):
-        print(f"初始化 eBPF IDS 系统...")
-        tcp_count = self.rule_manager.load_tcp_rules()
-        
-        if not self.load_ebpf_program():
-            return False
-        
-        # Create event handler with alert logging
-        self.event_handler = EventHandler(self.rule_manager, log_file="ids_alerts.log")
-        
-        if not self.attach_probes():
-            return False
-        
-        return True
-
-    def start(self):
-        """启动 IDS 监控"""
-        if not self.initialize():
-            print("✗ IDS 初始化失败")
-            return
-        
-        print("=" * 60)
-        print("✓ eBPF IDS 启动成功，开始监控网络流量...")
-        print(f"✓ 告警日志文件: {self.event_handler.log_file}")
-        print("=" * 60)
-        print("按 Ctrl+C 停止监控\n")
-        
-        # Open perf buffers for both alerts and events
-        try:
-            # Attach alert handler to "alerts" perf buffer
-            self.bpf["alerts"].open_perf_buffer(self.event_handler.handle_alert)
-            print("✓ Alert perf buffer 已连接")
-        except KeyError:
-            print("⚠️  警告: 'alerts' perf buffer 未找到，告警功能可能不可用")
-        
-        try:
-            # Optional: attach packet event handler if needed
-            # self.bpf["events"].open_perf_buffer(self.event_handler.handle_event)
-            pass
-        except KeyError:
-            pass
-        
-        # Event polling loop
-        try:
-            print("开始轮询事件...\n")
-            while True:
-                self.bpf.perf_buffer_poll(timeout=100)  # Poll with 100ms timeout
-        except KeyboardInterrupt:
-            self.stop()
-
-    def stop(self):
-        """停止 IDS"""
-        print("\n" + "=" * 60)
-        if self.event_handler:
-            stats = self.event_handler.get_stats()
-            print(f"监控已停止")
-            print(f"  总事件数: {stats['total_events']}")
-            print(f"  总告警数: {stats['total_alerts']}")
-            print(f"  告警日志: {self.event_handler.log_file}")
-        print("=" * 60)
+            print(f"✗ IDS 初始化失败: {e}")
+            raise
 
 
 def main():
-    """主函数"""
-    rules_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "rules"
-    )
-    
-    ids = IDSManager(rules_dir=rules_dir)
-    
-    def signal_handler(sig, frame):
-        ids.stop()
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    ids.start()
+    manager = IDSManager()
+    manager.init_ids()
 
 
 if __name__ == "__main__":
+    # When invoked directly, ensure we start from the project root or above.
+    # This also avoids very long absolute paths if the script is symlinked.
+    try:
+        os.chdir(PROJECT_ROOT)
+    except Exception:
+        # If changing directory fails, continue; the manager will still try to
+        # correct cwd before BPF(text=...) is called.
+        pass
+
     main()
