@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
 eBPF Code Generator for Snort TCP Rules
-Converts parsed Snort rules to eBPF C code segments
+
+Converts parsed Snort rules to eBPF C code segments.
 """
 
 import json
@@ -31,8 +33,10 @@ class TCPRuleEBPFCodegen:
     def __init__(self, rule_config: Dict[str, Any]):
         if rule_config.get("protocol_num") != 6:
             raise ValueError(
-                f"Only TCP rules supported (protocol_num=6), got {rule_config.get('protocol_num')}"
+                f"Only TCP rules supported (protocol_num=6), "
+                f"got {rule_config.get('protocol_num')}"
             )
+
         self.rule = rule_config
         self.sid = rule_config.get("sid", 0)
         self.msg = rule_config.get("msg", "Unknown rule")
@@ -47,7 +51,7 @@ class TCPRuleEBPFCodegen:
         # Comment header
         code_parts.append(self.generate_header_comment())
 
-        # Define alert function before any use of alert_rule_<sid> in check_rule_<sid>
+        # Define alert function BEFORE the check function so calls are not implicit
         code_parts.append(self.generate_alert_function())
 
         # Now emit the check function that calls alert_rule_<sid>
@@ -74,7 +78,8 @@ class TCPRuleEBPFCodegen:
     def generate_check_function(self) -> str:
         """Generate the main packet checking function"""
         func_name = f"check_rule_{self.sid}"
-        code_parts = [
+
+        code_parts: List[str] = [
             f"/* Check function for rule {self.sid} */",
             f"static __always_inline int {func_name}(struct __sk_buff *skb, void *data, void *data_end) {{",
             "    /* Parse Ethernet header */",
@@ -102,15 +107,21 @@ class TCPRuleEBPFCodegen:
             "",
         ]
 
+        # Protocol and IP checks
         code_parts.append(self.generate_protocol_checks(func_name))
+
+        # Port checks
         code_parts.append(self.generate_port_checks())
 
+        # TCP flag checks
         if self.rule.get("tcp_flags"):
             code_parts.append(self.generate_flags_checks())
 
+        # Content / payload checks
         if self.rule.get("content"):
             code_parts.append(self.generate_content_checks())
 
+        # Final alert trigger
         code_parts.append("    /* All checks passed - trigger alert */")
         code_parts.append(
             f"    alert_rule_{self.sid}(skb, iph->saddr, iph->daddr, tcph->source, tcph->dest);"
@@ -122,7 +133,7 @@ class TCPRuleEBPFCodegen:
 
     def generate_protocol_checks(self, func_name: str) -> str:
         """Generate IP/port validation checks"""
-        checks = []
+        checks: List[str] = []
 
         src_ip = self.rule.get("src_ip")
         if src_ip and src_ip != "any":
@@ -137,9 +148,7 @@ class TCPRuleEBPFCodegen:
     def generate_ip_check(self, direction: str, ip_var: str, ip_spec: str) -> str:
         """Generate IP address checking code"""
         if ip_spec.startswith("$"):
-            return (
-                f"    /* Variable IP check: {ip_spec} ({direction}) */\n"
-            )
+            return f"    /* Variable IP check: {ip_spec} ({direction}) */\n"
 
         try:
             network = ipaddress.ip_network(ip_spec, strict=False)
@@ -161,7 +170,7 @@ class TCPRuleEBPFCodegen:
 
     def generate_port_checks(self) -> str:
         """Generate port matching checks"""
-        checks = []
+        checks: List[str] = []
 
         src_port = self.rule.get("src_port")
         if src_port:
@@ -201,18 +210,21 @@ class TCPRuleEBPFCodegen:
 
         elif port_type == "list":
             ports = port_spec.get("ports", [])
-            valid_ports = []
+            valid_ports: List[int] = []
+
             for p in ports:
                 try:
                     p_int = int(p)
                 except (TypeError, ValueError):
                     continue
+                # Restrict to common range to keep code size manageable
                 if 1 <= p_int <= 1000:
                     valid_ports.append(p_int)
 
             if not valid_ports:
                 return (
-                    f"    /* No valid {direction} ports in list (1-1000), skipping port check */\n"
+                    f"    /* No valid {direction} ports in list (1-1000), "
+                    f"skipping port check */\n"
                 )
 
             port_checks = [f"ntohs({port_var}) != {p}" for p in valid_ports]
@@ -239,8 +251,9 @@ class TCPRuleEBPFCodegen:
         if not flags:
             return ""
 
-        checks = ["    /* Check TCP flags */"]
-        flag_byte_checks = []
+        checks: List[str] = ["    /* Check TCP flags */"]
+
+        flag_byte_checks: List[str] = []
 
         if flags.get("SYN"):
             flag_byte_checks.append("tcph->syn == 1")
@@ -269,11 +282,25 @@ class TCPRuleEBPFCodegen:
         if not content:
             return ""
 
-        checks = [
+        # Convert content (list/str/etc.) to a safe, readable string
+        try:
+            content_str = json.dumps(content, ensure_ascii=False)
+        except TypeError:
+            content_str = str(content)
+
+        # Avoid extremely long lines
+        if len(content_str) > 200:
+            content_str = content_str[:197] + "..."
+
+        # Make it safe for a single-line comment
+        content_str = content_str.replace("\n", "\\n")
+
+        checks: List[str] = [
             "    /* Content matching (simplified) */",
-            f"    /* Full pattern: {content} */",
-            "    /* Note: Complex content matching requires BPF string matching library */",
+            f"    // Full pattern: {content_str}",
+            "    // Note: Complex content matching requires BPF string matching library",
         ]
+
         return "\n".join(checks)
 
     def generate_alert_function(self) -> str:
@@ -283,7 +310,11 @@ class TCPRuleEBPFCodegen:
 
         code = f"""
 /* Alert function for rule {self.sid} */
-static __always_inline void alert_rule_{self.sid}(struct __sk_buff *skb, u32 src_ip, u32 dst_ip, u16 src_port, u16 dst_port) {{
+static __always_inline void alert_rule_{self.sid}(struct __sk_buff *skb,
+                                                 u32 src_ip,
+                                                 u32 dst_ip,
+                                                 u16 src_port,
+                                                 u16 dst_port) {{
     struct alert_event {{
         u32 rule_id;
         u32 priority;
@@ -292,18 +323,19 @@ static __always_inline void alert_rule_{self.sid}(struct __sk_buff *skb, u32 src
         u16 src_port;
         u16 dst_port;
         char msg[256];
-    }} alert = {{}};
-    
-    alert.rule_id = {self.sid};
+    }} alert = {{0}};
+
+    alert.rule_id  = {self.sid};
     alert.priority = {self.priority};
-    alert.src_ip = src_ip;
-    alert.dst_ip = dst_ip;
+    alert.src_ip   = src_ip;
+    alert.dst_ip   = dst_ip;
     alert.src_port = src_port;
     alert.dst_port = dst_port;
-    
+
     /* Copy alert message (limited to 255 chars in eBPF) */
-    __builtin_memcpy(alert.msg, "{safe_msg}", sizeof("{safe_msg}") < 255 ? sizeof("{safe_msg}") : 255);
-    
+    __builtin_memcpy(alert.msg, "{safe_msg}",
+                     sizeof("{safe_msg}") < 255 ? sizeof("{safe_msg}") : 255);
+
     /* Submit alert to userspace via perf buffer */
     alerts.perf_submit(skb, &alert, sizeof(alert));
 }}
@@ -332,15 +364,16 @@ class TCPRulesEBPFManager:
     """Manager class for handling multiple TCP rules"""
 
     def __init__(self):
-        self.generators = []
-        self.generated_code = []
-        self.rule_metadata = []
+        self.generators: List[TCPRuleEBPFCodegen] = []
+        self.generated_code: List[str] = []
+        self.rule_metadata: List[Dict[str, Any]] = []
 
     def add_rule(self, rule_config: Dict[str, Any]) -> bool:
         """Add a TCP rule for code generation"""
         try:
             if rule_config.get("protocol_num") != 6:
                 return False
+
             generator = TCPRuleEBPFCodegen(rule_config)
             self.generators.append(generator)
             return True
@@ -383,14 +416,13 @@ class TCPRulesEBPFManager:
  * This code requires Linux kernel 4.1+ with eBPF support
  */
 
-
-#include <uapi/linux/ptrace.h>
+#include <uapi/linux/bpf.h>
+#include <uapi/linux/if_ether.h>
 #include <uapi/linux/ip.h>
 #include <uapi/linux/tcp.h>
-#include <uapi/linux/if_ether.h>
-#include <net/sock.h>
-#include <bcc/proto.h>
-
+#include <linux/in.h>
+#include <linux/types.h>
+#include <linux/string.h>
 
 /* Alert event structure */
 struct alert_event {
@@ -403,20 +435,18 @@ struct alert_event {
     char msg[256];
 };
 
-
 /* Define perf buffer for alerts */
 BPF_PERF_OUTPUT(alerts);
 
-
 """
 
-        # Add main filter function that calls all rule checks
+        # Main filter function that calls all rule checks
         main_function = """
 /* Main packet filter function */
 int ids_filter(struct __sk_buff *skb) {
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
-    
+
     /* Check all rules */
 """
 
@@ -424,8 +454,8 @@ int ids_filter(struct __sk_buff *skb) {
         for generator in self.generators:
             main_function += f"    check_rule_{generator.sid}(skb, data, data_end);\n"
 
-        main_function += """    
-    return 0;  /* Pass packet to network stack */
+        main_function += """
+    return 0; /* Pass packet to network stack */
 }
 """
 
@@ -454,10 +484,12 @@ if __name__ == "__main__":
         all_rules = json.load(f)
 
     tcp_rules = [r for r in all_rules if r.get("protocol_num") == 6]
+
     print(f"Total rules: {len(all_rules)}")
     print(f"TCP rules: {len(tcp_rules)}")
 
     manager = TCPRulesEBPFManager()
+
     for rule in tcp_rules[:5]:
         if manager.add_rule(rule):
             print(f"Added rule SID: {rule.get('sid')}")
@@ -469,5 +501,5 @@ if __name__ == "__main__":
     manager.export_metadata("generated/tcp_rules_metadata.json")
 
     print("\nGenerated files:")
-    print("  - generated/tcp_rules.c")
-    print("  - generated/tcp_rules_metadata.json")
+    print(" - generated/tcp_rules.c")
+    print(" - generated/tcp_rules_metadata.json")
