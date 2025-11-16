@@ -366,7 +366,7 @@ class IDSManager:
             src_ip = rule.get("src_ip", "any")
             dst_ip = rule.get("dst_ip", "any")
 
-            if not is_valid_ip(src_ip) or not is_valid_ip(dst_ip):
+            if not self.is_valid_ip(src_ip) or not self.is_valid_ip(dst_ip):
                 # 非法 IP 或未知变量，直接跳过
                 continue
 
