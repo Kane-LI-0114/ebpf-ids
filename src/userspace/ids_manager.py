@@ -15,7 +15,13 @@ import fcntl
 import struct
 import array
 from datetime import datetime
-from utils.parser import SnortRuleParser
+import sys
+import os
+
+# Add the parent directory to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+from utils import SnortRuleParser
 
 def get_active_interface():
     """自动检测活动的网络接口"""
