@@ -328,6 +328,17 @@ class IDSManager:
         self.event_handler = None
         self.running = False
 
+    @staticmethod
+    def is_valid_ip(ip: str) -> bool:
+        """判断字符串是否为合法 IPv4"""
+        if ip in ["any", "$HOME_NET", "$EXTERNAL_NET"]:
+            return True
+        try:
+            socket.inet_aton(ip)
+            return True
+        except:
+            return False
+
     def filter_rules(self, rules):
         filtered = []
 
@@ -351,6 +362,15 @@ class IDSManager:
             if not (1 <= p1 <= 65535):
                 continue
 
+            # 3) src_ip / dst_ip 合法性检查
+            src_ip = rule.get("src_ip", "any")
+            dst_ip = rule.get("dst_ip", "any")
+
+            if not is_valid_ip(src_ip) or not is_valid_ip(dst_ip):
+                # 非法 IP 或未知变量，直接跳过
+                continue
+
+            # 通过检查，保留规则
             filtered.append(rule)
 
         return filtered
