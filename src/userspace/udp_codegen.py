@@ -149,16 +149,53 @@ static __always_inline void send_alert(void *ctx, u32 sid,
     def _generate_rule_checker(self) -> str:
        """Generate the main rule checking logic"""
        code = ["// UDP Rule Checker",
-            "static __always_inline int check_udp_rules(void *ctx,",  # Changed from struct __sk_buff
+            "static __always_inline int check_udp_rules(void *ctx,",
             "                                            u32 src_ip, u32 dst_ip,",
             "                                            u16 src_port, u16 dst_port,",
             "                                            void *payload, void *data_end) {",
             "    int matched = 0;",
             ""]
     
-    # ... rest of your rule generation code stays the same ...
+    # Generate rule checks for each UDP rule
+       for i, rule in enumerate(self.rules):
+         sid = rule.get("sid", 0)
+         msg = rule.get("msg", "Unknown").replace('"', '\\"')  # Escape quotes
+         priority = rule.get("priority", 3)
+        
+        # Parse destination port
+         dst_port = rule.get("dst_port")
+         if dst_port and isinstance(dst_port, dict):
+             port_num = dst_port.get("port", 0)
+             port_type = dst_port.get("type", "any")
+            
+             if port_type == "single" and port_num:
+                 code.append(f"    // Rule {sid}: {msg}")
+                 code.append(f"    if (dst_port == {port_num}) {{")
+                 code.append(f"        send_alert(ctx, {sid}, {priority}, src_ip, dst_ip, src_port, dst_port, \"{msg}\");")
+                 code.append(f"        matched++;")
+                 code.append(f"    }}")
+                 code.append("")
+        
+        # Parse source port
+         src_port_rule = rule.get("src_port")
+         if src_port_rule and isinstance(src_port_rule, dict):
+             port_num = src_port_rule.get("port", 0)
+             port_type = src_port_rule.get("type", "any")
+            
+             if port_type == "single" and port_num:
+                 code.append(f"    // Rule {sid}: {msg}")
+                 code.append(f"    if (src_port == {port_num}) {{")
+                 code.append(f"        send_alert(ctx, {sid}, {priority}, src_ip, dst_ip, src_port, dst_port, \"{msg}\");")
+                 code.append(f"        matched++;")
+                 code.append(f"    }}")
+                 code.append("")
+    
+    # Close the function
+       code.append("    return matched;")
+       code.append("}")
     
        return "\n".join(code)
+
 
     def _generate_main_function(self) -> str:
         """Generate the main BPF filter function"""
