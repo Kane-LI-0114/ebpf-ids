@@ -190,21 +190,21 @@ class EventHandler:
         self.last_alerts = {}  # 用于去重：(src_ip, dst_ip, sid) -> timestamp
 
     def handle_event(self, cpu, data, size):
-        """处理 eBPF 事件 - 带 IP/端口转换"""
+        """处理 eBPF 事件 - 自动转换 IP/端口"""
         import ctypes as ct
-        import socket
         from datetime import datetime
         import time
+        import socket, struct
 
         class PacketEvent(ct.Structure):
             _fields_ = [
-                ("src_ip", ct.c_uint32),  # 4
-                ("dst_ip", ct.c_uint32),  # 4
-                ("src_port", ct.c_uint16),  # 2
-                ("dst_port", ct.c_uint16),  # 2
-                ("protocol", ct.c_uint8),  # 1
-                ("_pad", ct.c_ubyte * 3),  # 3 padding
-                ("sid", ct.c_uint32),  # 4
+                ("src_ip", ct.c_uint32),
+                ("dst_ip", ct.c_uint32),
+                ("src_port", ct.c_uint16),
+                ("dst_port", ct.c_uint16),
+                ("protocol", ct.c_uint8),
+                ("_pad", ct.c_ubyte * 3),
+                ("sid", ct.c_uint32),
             ]
 
         try:
@@ -215,27 +215,24 @@ class EventHandler:
             event = ct.cast(data, ct.POINTER(PacketEvent)).contents
             self.event_count += 1
 
-            matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
-
-            # IP 转换
-            src_ip = socket.inet_ntoa(struct.pack(">I", event.src_ip))
-            dst_ip = socket.inet_ntoa(struct.pack(">I", event.dst_ip))
-
-            # TCP/UDP 端口转换
-            if event.protocol in (6, 17):  # TCP 或 UDP
+            # 转换 IP/端口
+            src_ip = socket.inet_ntoa(struct.pack("<I", event.src_ip))
+            dst_ip = socket.inet_ntoa(struct.pack("<I", event.dst_ip))
+            if event.protocol in (6, 17):  # TCP/UDP
                 src_port = socket.ntohs(event.src_port)
                 dst_port = socket.ntohs(event.dst_port)
-            else:
-                src_port = event.src_port
-                dst_port = event.dst_port
+            else:  # ICMP 等
+                src_port = 0
+                dst_port = 0
+
+            matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
 
             if matched_rule and event.sid != 0:
-                # 去重检查
+                # 去重
                 alert_key = (event.src_ip, event.dst_ip, event.sid)
                 current_time = time.time()
-                if alert_key in self.last_alerts:
-                    if current_time - self.last_alerts[alert_key] < 10:
-                        return
+                if alert_key in self.last_alerts and current_time - self.last_alerts[alert_key] < 10:
+                    return
                 self.last_alerts[alert_key] = current_time
                 self.alert_count += 1
 
