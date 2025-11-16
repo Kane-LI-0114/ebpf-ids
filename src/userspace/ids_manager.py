@@ -190,8 +190,9 @@ class EventHandler:
         self.last_alerts = {}  # 用于去重：(src_ip, dst_ip, sid) -> timestamp
 
     def handle_event(self, cpu, data, size):
-        """处理eBPF事件 - 添加详细调试"""
+        """处理 eBPF 事件 - 带 IP/端口转换"""
         import ctypes as ct
+        import socket
         from datetime import datetime
         import time
 
@@ -202,7 +203,7 @@ class EventHandler:
                 ("src_port", ct.c_uint16),  # 2
                 ("dst_port", ct.c_uint16),  # 2
                 ("protocol", ct.c_uint8),  # 1
-                ("_pad", ct.c_ubyte * 3),  # 3 padding bytes
+                ("_pad", ct.c_ubyte * 3),  # 3 padding
                 ("sid", ct.c_uint32),  # 4
             ]
 
@@ -214,25 +215,31 @@ class EventHandler:
             event = ct.cast(data, ct.POINTER(PacketEvent)).contents
             self.event_count += 1
 
-            # 正常的事件处理逻辑
             matched_rule = self.rule_manager.get_rule_by_sid(event.sid)
+
+            # IP 转换
+            src_ip = socket.inet_ntoa(struct.pack(">I", event.src_ip))
+            dst_ip = socket.inet_ntoa(struct.pack(">I", event.dst_ip))
+
+            # TCP/UDP 端口转换
+            if event.protocol in (6, 17):  # TCP 或 UDP
+                src_port = socket.ntohs(event.src_port)
+                dst_port = socket.ntohs(event.dst_port)
+            else:
+                src_port = event.src_port
+                dst_port = event.dst_port
 
             if matched_rule and event.sid != 0:
                 # 去重检查
                 alert_key = (event.src_ip, event.dst_ip, event.sid)
                 current_time = time.time()
-
                 if alert_key in self.last_alerts:
                     if current_time - self.last_alerts[alert_key] < 10:
                         return
-
                 self.last_alerts[alert_key] = current_time
                 self.alert_count += 1
 
-                # 生成告警
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                src_ip = self.format_ip(event.src_ip)
-                dst_ip = self.format_ip(event.dst_ip)
                 protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
                 protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
 
@@ -242,23 +249,21 @@ class EventHandler:
                 print(f"规则: [{matched_rule['sid']}] {matched_rule['msg']}")
                 print(f"分类: {matched_rule['classtype']} | 优先级: {matched_rule['priority']}")
                 print(f"协议: {protocol_name}")
-                print(f"源地址: {src_ip}:{event.src_port}")
-                print(f"目标地址: {dst_ip}:{event.dst_port}")
+                print(f"源地址: {src_ip}:{src_port}")
+                print(f"目标地址: {dst_ip}:{dst_port}")
                 print(f"{'=' * 80}\n")
             else:
                 # 普通流量日志
                 if self.event_count % 10 == 0:
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    src_ip = self.format_ip(event.src_ip)
-                    dst_ip = self.format_ip(event.dst_ip)
                     protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
                     protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
-
                     print(
-                        f"[{timestamp}] [事件 #{self.event_count}] {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} | {protocol_name}")
+                        f"[{timestamp}] [事件 #{self.event_count}] {src_ip}:{src_port} -> {dst_ip}:{dst_port} | {protocol_name}")
 
         except Exception as e:
             print(f"[错误] 事件处理异常: {e}")
+
 
     def _generate_alert(self, event, rule):
         """生成规则匹配告警"""
