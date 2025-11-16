@@ -310,8 +310,12 @@ struct packet_event {
 """
 
     def ip2int(self, ip: str) -> int:
-        """把点分十进制 IP 转为 uint32 网络字节序"""
-        return struct.unpack("!I", socket.inet_aton(ip))[0]
+        print(f"[DEBUG] Converting IP to int: {ip!r}")  # <-- 打印 IP 字符串
+        try:
+            return struct.unpack("!I", socket.inet_aton(ip))[0]
+        except Exception as e:
+            print(f"[ERROR] Failed to convert IP {ip!r}: {e}")
+            raise
 
     def compile_rules(self, rules):
         """
