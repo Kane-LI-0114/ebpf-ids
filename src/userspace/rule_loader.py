@@ -290,72 +290,75 @@ class RuleCompiler:
     def __init__(self):
         # TCP 模板
         self.template_tcp = r"""
-/* rule {sid} (tcp) */
-do {{
-    unsigned char iphdr[20];
-    if (bpf_skb_load_bytes(skb, 14, iphdr, 20) < 0) break;
-    if (iphdr[9] != 6) break;  // TCP
+    /* rule {sid} (tcp) */
+    int ids_filter(struct __sk_buff *skb) __attribute__((section("socket"), used));
+    do {{
+        unsigned char iphdr[20];
+        if (bpf_skb_load_bytes(skb, 14, iphdr, 20) < 0) break;
+        if (iphdr[9] != 6) break;  // TCP
 
-    unsigned int ihl = (iphdr[0] & 0x0F) * 4;
-    unsigned int l4 = 14 + ihl;
+        unsigned int ihl = (iphdr[0] & 0x0F) * 4;
+        unsigned int l4 = 14 + ihl;
 
-    unsigned char flags = 0;
-    if (bpf_skb_load_bytes(skb, l4 + 13, &flags, 1) < 0) break;
+        unsigned char flags = 0;
+        if (bpf_skb_load_bytes(skb, l4 + 13, &flags, 1) < 0) break;
 
-    // required TCP flags
-    if (!({flag_expr})) break;
+        // required TCP flags
+        if (!({flag_expr})) break;
 
-    {content_code}
+        {content_code}
 
-    // matched
-    UPDATE_STATS_AND_EMIT_EVENT({sid});
-    return 0;
-}} while (0);
-"""
+        // matched
+        UPDATE_STATS_AND_EMIT_EVENT({sid});
+        return 0;
+    }} while (0);
+    """
 
         # UDP 模板
         self.template_udp = r"""
-/* rule {sid} (udp) */
-do {{
-    unsigned char iphdr[20];
-    if (bpf_skb_load_bytes(skb, 14, iphdr, 20) < 0) break;
-    if (iphdr[9] != 17) break;  // UDP
+    /* rule {sid} (udp) */
+    int ids_filter(struct __sk_buff *skb) __attribute__((section("socket"), used));
+    do {{
+        unsigned char iphdr[20];
+        if (bpf_skb_load_bytes(skb, 14, iphdr, 20) < 0) break;
+        if (iphdr[9] != 17) break;  // UDP
 
-    unsigned int ihl = (iphdr[0] & 0x0F) * 4;
-    unsigned int l4 = 14 + ihl;
+        unsigned int ihl = (iphdr[0] & 0x0F) * 4;
+        unsigned int l4 = 14 + ihl;
 
-    unsigned short dport = 0;
-    unsigned char dp0 = 0, dp1 = 0;
-    if (bpf_skb_load_bytes(skb, l4 + 2, &dp0, 1) < 0 ||
-        bpf_skb_load_bytes(skb, l4 + 3, &dp1, 1) < 0) break;
-    dport = (dp0 << 8) | dp1;
+        unsigned short dport = 0;
+        unsigned char dp0 = 0, dp1 = 0;
+        if (bpf_skb_load_bytes(skb, l4 + 2, &dp0, 1) < 0 ||
+            bpf_skb_load_bytes(skb, l4 + 3, &dp1, 1) < 0) break;
+        dport = (dp0 << 8) | dp1;
 
-    if ({port_check}) break;
+        if ({port_check}) break;
 
-    {content_code}
+        {content_code}
 
-    UPDATE_STATS_AND_EMIT_EVENT({sid});
-    return 0;
-}} while (0);
-"""
+        UPDATE_STATS_AND_EMIT_EVENT({sid});
+        return 0;
+    }} while (0);
+    """
 
         # ICMP 模板
         self.template_icmp = r"""
-/* rule {sid} (icmp) */
-do {{
-    unsigned char proto = 0;
-    if (bpf_skb_load_bytes(skb, 14 + 9, &proto, 1) < 0) break;
-    if (proto != 1) break; // ICMP
+    /* rule {sid} (icmp) */
+    int ids_filter(struct __sk_buff *skb) __attribute__((section("socket"), used));
+    do {{
+        unsigned char proto = 0;
+        if (bpf_skb_load_bytes(skb, 14 + 9, &proto, 1) < 0) break;
+        if (proto != 1) break; // ICMP
 
-    unsigned char type = 0;
-    if (bpf_skb_load_bytes(skb, 14 + 20, &type, 1) < 0) break;
+        unsigned char type = 0;
+        if (bpf_skb_load_bytes(skb, 14 + 20, &type, 1) < 0) break;
 
-    if (type != {icmp_type}) break;
+        if (type != {icmp_type}) break;
 
-    UPDATE_STATS_AND_EMIT_EVENT({sid});
-    return 0;
-}} while (0);
-"""
+        UPDATE_STATS_AND_EMIT_EVENT({sid});
+        return 0;
+    }} while (0);
+    """
 
     # ----------------------------------------------------------------------
 
