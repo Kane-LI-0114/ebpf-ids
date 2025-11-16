@@ -287,6 +287,9 @@ KERNEL_DIR = os.path.join(PROJECT_ROOT, "src", "kernel")
 USERSPACE_DIR = os.path.join(PROJECT_ROOT, "src", "userspace", "ebpf-ids")
 
 TCP_RULES_C_PATH = os.path.join(KERNEL_DIR, "tcp_rules.c")
+udp_c_path = os.path.join(KERNEL_DIR, 'udp_rules.c')
+udp_meta_path = os.path.join(KERNEL_DIR, 'udp_rules_metadata.json')
+
 TCP_RULES_META_PATH = os.path.join(KERNEL_DIR, "tcp_rules_metadata.json")
 SNORT_RULES_JSON = os.path.join(PROJECT_ROOT, "snort_rules_ebpf.json")
 
@@ -376,8 +379,8 @@ class IDSManager:
         """编译和加载 eBPF 程序，并作为 socket filter 挂载到接口"""
         print("正在编译 eBPF 程序...")
 
-        if not os.path.isfile(TCP_RULES_C_PATH):
-            raise FileNotFoundError(f"未找到生成的 eBPF 内核代码: {TCP_RULES_C_PATH}")
+        if not os.path.isfile(udp_c_path):
+            raise FileNotFoundError(f"未找到生成的 eBPF 内核代码: {udp_c_path}")
 
         with open(TCP_RULES_C_PATH, "r") as f:
             kernel_code = f.read()
