@@ -367,6 +367,7 @@ class IDSManager:
             # 2️⃣ 动态生成 eBPF C 代码
             compiler = RuleCompiler()
             ebpf_source = compiler.compile_rules(rules)
+            print(f"DEBUG: ebpf_source={ebpf_source!r}")
             print(f"生成的 C 代码长度: {len(ebpf_source)}")
 
             # 3️⃣ 写入临时文件以供调试
