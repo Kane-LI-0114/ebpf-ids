@@ -286,6 +286,7 @@ class RuleParser:
         return compiled_rules
 
 
+import socket, struct
 class RuleCompiler:
     def __init__(self):
         self.header = r"""
@@ -313,8 +314,6 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
     return bpf_skb_load_bytes(skb, off, out, 1);
 }
 """
-
-    import socket, struct
 
     def ip2int(ip):
         """把点分十进制 IP 转为 uint32 网络字节序"""
