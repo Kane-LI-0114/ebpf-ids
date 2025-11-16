@@ -316,8 +316,10 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 
     def compile_rules(self, rules):
         """
-        仅根据 src_ip, src_port, dst_ip, dst_port, protocol 进行匹配
-        rules 保证全部是 dst_port = single 的规则
+        生成 eBPF C 代码，只匹配 src_ip, src_port, dst_ip, dst_port, protocol
+        假设传入的 rules 已经是:
+            - attempted-recon
+            - dst_port = single
         """
         parts = [self.header]
         parts.append("int ids_filter(struct __sk_buff *skb) {")
@@ -325,10 +327,23 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 
         for r in rules:
             sid = int(r.get("sid", 0))
-            proto = int(r.get("protocol_num", 0) or 0)
+            proto = int(r.get("protocol_num", 0) or r.get("protocol", 0))
 
-            # ★ 直接取 single port，不再做类型判断
-            port = r["dst_port"]["port"]
+            # ---------------- dst_port ----------------
+            dst_port_tuple = r["dst_port"]
+            ptype, dst_port, _ = dst_port_tuple
+            # 上层保证 ptype == 1，理论上无需检查
+
+            # ---------------- src_port ----------------
+            src_port_val = None
+            if "src_port" in r:
+                sp = r["src_port"]
+                if isinstance(sp, tuple):
+                    _, src_port_val, _ = sp
+                elif isinstance(sp, int):
+                    src_port_val = sp
+                else:
+                    src_port_val = None  # 其他类型忽略
 
             parts.append(f"    /* rule {sid} start */")
             parts.append("    do {")
@@ -336,7 +351,6 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
             # ----- load protocol -----
             parts.append("        unsigned char proto_b = 0;")
             parts.append("        if (bpf_skb_load_bytes(skb, 23, &proto_b, 1) < 0) break;")
-
             if proto != 0:
                 parts.append(f"        if (proto_b != {proto}) break;")
 
@@ -347,7 +361,6 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
             # ------- IP checks (optional) --------
             if r.get("src_ip"):
                 parts.append(f"        if (iph.saddr != {r['src_ip']}) break;")
-
             if r.get("dst_ip"):
                 parts.append(f"        if (iph.daddr != {r['dst_ip']}) break;")
 
@@ -360,7 +373,6 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
             parts.append("            if (bpf_skb_load_bytes(skb, 14 + iph.ihl*4, &th, sizeof(th)) < 0) break;")
             parts.append("            src_port_val = th.source;")
             parts.append("            dst_port_val = th.dest;")
-
             parts.append("        } else if (proto_b == IPPROTO_UDP) {")
             parts.append("            struct udphdr uh = {};")
             parts.append("            if (bpf_skb_load_bytes(skb, 14 + iph.ihl*4, &uh, sizeof(uh)) < 0) break;")
@@ -368,12 +380,10 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
             parts.append("            dst_port_val = uh.dest;")
             parts.append("        }")
 
-            # ------- ★ Only compare single dst_port -------
-            parts.append(f"        if (dst_port_val != {port}) break;")
-
-            # optional src_port
-            if r.get("src_port"):
-                parts.append(f"        if (src_port_val != {r['src_port']}) break;")
+            # ------- Port checks -------
+            parts.append(f"        if (dst_port_val != {dst_port}) break;")
+            if src_port_val is not None:
+                parts.append(f"        if (src_port_val != {src_port_val}) break;")
 
             # ----- Update stats -----
             parts.append(f"        __u32 _k = {sid};")
@@ -397,6 +407,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
 
         parts.append("    return 0;")
         parts.append("}")
-        return '\\n'.join(parts)
+        return '\n'.join(parts)
+
 
 
