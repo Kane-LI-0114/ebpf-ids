@@ -317,6 +317,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
     def compile_rules(self, rules):
         """
         rules 已经是 attempted-recon 类型
+        支持 dst_port 为 null / single / list
         payload content 可忽略
         """
         parts = [self.header]
@@ -337,12 +338,25 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
                 parts.append(f"        if (proto_b != {proto}) break;")
 
             # TCP/UDP dst port
-            if dst_port:
-                parts.append("        unsigned char p0=0, p1=0;")
-                parts.append("        if (bpf_skb_load_bytes(skb, 36, &p0, 1) < 0) break;")  # 偏移到 TCP/UDP dst_port
-                parts.append("        if (bpf_skb_load_bytes(skb, 37, &p1, 1) < 0) break;")
-                parts.append("        unsigned short dst_port_val = (p0 << 8) | p1;")
-                parts.append(f"        if (dst_port_val != {dst_port}) break;")
+            parts.append("        unsigned short dst_port_val = 0;")
+            parts.append("        if (proto_b == IPPROTO_TCP || proto_b == IPPROTO_UDP) {")
+            parts.append("            unsigned char p0=0, p1=0;")
+            parts.append("            if (bpf_skb_load_bytes(skb, 36, &p0, 1) < 0) break;")
+            parts.append("            if (bpf_skb_load_bytes(skb, 37, &p1, 1) < 0) break;")
+            parts.append("            dst_port_val = (p0 << 8) | p1;")
+            # 判断端口类型
+            if dst_port is None:
+                # null 不检查端口
+                pass
+            elif isinstance(dst_port, dict) and dst_port.get("type") == "single":
+                port = dst_port.get("port", 0)
+                parts.append(f"            if (dst_port_val != {port}) break;")
+            elif isinstance(dst_port, dict) and dst_port.get("type") == "list":
+                ports = dst_port.get("ports", [])
+                if ports:
+                    check = " && ".join([f"(dst_port_val != {p})" for p in ports])
+                    parts.append(f"            if ({check}) break;")
+            parts.append("        }")
 
             # 更新 rule 统计
             parts.append(f"        __u32 _k = {sid};")
