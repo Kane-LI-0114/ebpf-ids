@@ -76,8 +76,8 @@ class UDPRulesEBPFManager:
         }
 
     def _generate_header(self) -> str:
-       """Generate BPF header includes and definitions"""
-       return """#include <linux/if_ether.h>
+      """Generate BPF header includes and definitions"""
+      return """#include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
@@ -95,34 +95,17 @@ struct alert_event {
     char msg[256];
 };
 
-BPF_PERF_OUTPUT(alert_events);
+BPF_PERF_OUTPUT(alerts);  // Changed from alert_events to alerts
 """
-
     def _generate_data_structures(self) -> str:
         """Generate BPF maps for rule storage"""
         return f"""// UDP Rule count: {self.rule_count}
 // Rules are compiled into the checker function"""
 
+    
     def _generate_helper_functions(self) -> str:
-       """Generate helper functions for packet parsing and matching"""
-       return """// Helper: Check if IP matches (supports basic matching)
-static __always_inline int match_ip(u32 packet_ip, const char *rule_ip_str) {
-    // For simplicity, we match against common variables
-    return 1; // Accept all for now
-}
-
-// Helper: Check if port matches
-static __always_inline int match_port(u16 packet_port, u16 rule_port, int port_type) {
-    if (port_type == 0) { // any port
-        return 1;
-    }
-    if (port_type == 1) { // single port
-        return packet_port == rule_port;
-    }
-    return 0;
-}
-
-// Helper: Send alert  
+     """Generate helper functions for packet parsing and matching"""
+     return """// Helper: Send alert  
 static __always_inline void send_alert(void *ctx, u32 sid,
                                        u32 priority, u32 src_ip, u32 dst_ip,
                                        u16 src_port, u16 dst_port,
@@ -143,7 +126,7 @@ static __always_inline void send_alert(void *ctx, u32 sid,
         }
     }
     
-    alert_events.perf_submit(ctx, &alert, sizeof(alert));
+    alerts.perf_submit(ctx, &alert, sizeof(alert));  // Changed from alert_events
 }"""
 
     def _generate_rule_checker(self) -> str:
@@ -198,53 +181,36 @@ static __always_inline void send_alert(void *ctx, u32 sid,
 
 
     def _generate_main_function(self) -> str:
-        """Generate the main BPF filter function"""
-        return """// Main UDP IDS filter function (Socket Filter mode)
+      """Generate the main BPF filter function"""
+      return """// Main UDP IDS filter function (Socket Filter mode)
 int ids_filter(struct __sk_buff *skb) {
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
+    // Socket filters cannot directly access skb->data/data_end
+    // We need to use BPF helper functions instead
     
-    // Parse Ethernet header
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end) {
+    // Get protocol from IP header at offset 14 + 9
+    u8 protocol = load_byte(skb, 14 + 9);
+    if (protocol != IPPROTO_UDP) {
         return 0;
     }
     
-    // Check if IP packet
-    if (eth->h_proto != __constant_htons(ETH_P_IP)) {
-        return 0;
-    }
+    // Extract source and destination IPs (offset 14 + 12 and 14 + 16)
+    u32 src_ip = load_word(skb, 14 + 12);
+    u32 dst_ip = load_word(skb, 14 + 16);
     
-    // Parse IP header
-    struct iphdr *ip = (void *)(eth + 1);
-    if ((void *)(ip + 1) > data_end) {
-        return 0;
-    }
+    // Get IP header length to calculate UDP header position
+    u8 ihl = (load_byte(skb, 14) & 0x0F) * 4;
     
-    // Check if UDP
-    if (ip->protocol != IPPROTO_UDP) {
-        return 0;
-    }
+    // Extract UDP ports (after IP header)
+    u16 src_port = load_half(skb, 14 + ihl);
+    u16 dst_port = load_half(skb, 14 + ihl + 2);
     
-    // Parse UDP header
-    struct udphdr *udp = (void *)ip + (ip->ihl * 4);
-    if ((void *)(udp + 1) > data_end) {
-        return 0;
-    }
+    src_port = bpf_ntohs(src_port);
+    dst_port = bpf_ntohs(dst_port);
     
-    // Extract packet info
-    u32 src_ip = ip->saddr;
-    u32 dst_ip = ip->daddr;
-    u16 src_port = __constant_ntohs(udp->source);
-    u16 dst_port = __constant_ntohs(udp->dest);
+    // Check against UDP rules (no direct payload access)
+    check_udp_rules(skb, src_ip, dst_ip, src_port, dst_port, 0, 0);
     
-    // Payload starts after UDP header
-    void *payload = (void *)(udp + 1);
-    
-    // Check against UDP rules
-    check_udp_rules(skb, src_ip, dst_ip, src_port, dst_port, payload, data_end);
-    
-    return 0; // Continue processing
+    return 0;
 }"""
 
     def export_code(self, output_path: str):
