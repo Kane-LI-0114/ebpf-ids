@@ -61,11 +61,18 @@ class TCPRuleEBPFCodegen:
 
     def generate_header_comment(self) -> str:
         """Generate comment header with rule information"""
-        comment = f"""
+        # Sanitize msg for block comments: avoid '/*' and '*/' (which trigger -Wcomment)
+        header_msg = (
+            self.msg.replace("/*", "/ *")
+            .replace("*/", "* /")
+            .replace("\n", " ")
+        )
+
+        comment = f"""\
 /*
  * eBPF Rule Implementation
  * SID: {self.sid}
- * Rule Name: {self.msg}
+ * Rule Name: {header_msg}
  * Protocol: TCP (6)
  * Action: {self.action.upper()}
  * Priority: {self.priority}
@@ -363,15 +370,24 @@ static __always_inline void alert_rule_{self.sid}(struct __sk_buff *skb,
 class TCPRulesEBPFManager:
     """Manager class for handling multiple TCP rules"""
 
-    def __init__(self):
+    def __init__(self, max_rules: int = 50):
+        # Hard limit on how many TCP rules we will generate code for
+        self.max_rules = max_rules
         self.generators: List[TCPRuleEBPFCodegen] = []
         self.generated_code: List[str] = []
         self.rule_metadata: List[Dict[str, Any]] = []
 
     def add_rule(self, rule_config: Dict[str, Any]) -> bool:
-        """Add a TCP rule for code generation"""
+        """Add a TCP rule for code generation (up to max_rules)"""
         try:
+            # Only TCP rules
             if rule_config.get("protocol_num") != 6:
+                return False
+
+            # Enforce maximum number of rules
+            if len(self.generators) >= self.max_rules:
+                # Optional: log or silently skip extra rules
+                # print(f"Skipping rule SID {rule_config.get('sid')}, max_rules={self.max_rules} reached")
                 return False
 
             generator = TCPRuleEBPFCodegen(rule_config)
@@ -488,9 +504,10 @@ if __name__ == "__main__":
     print(f"Total rules: {len(all_rules)}")
     print(f"TCP rules: {len(tcp_rules)}")
 
-    manager = TCPRulesEBPFManager()
+    # Limit to 50 rules here as well
+    manager = TCPRulesEBPFManager(max_rules=50)
 
-    for rule in tcp_rules[:5]:
+    for rule in tcp_rules[:50]:
         if manager.add_rule(rule):
             print(f"Added rule SID: {rule.get('sid')}")
 
