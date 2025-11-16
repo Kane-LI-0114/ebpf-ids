@@ -377,7 +377,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
                 src_ip_val = "EXTERNAL_NET"
                 src_mask_val = "EXTERNAL_MASK"
             elif src_ip:
-                src_ip_val = str(ip2int(src_ip))
+                src_ip_val = str(self.ip2int(src_ip))
                 src_mask_val = "0xffffffff"
             else:
                 src_ip_val = None
@@ -392,7 +392,7 @@ static __always_inline int safe_load_byte(struct __sk_buff *skb, __u32 off, unsi
                 dst_ip_val = "EXTERNAL_NET"
                 dst_mask_val = "EXTERNAL_MASK"
             elif dst_ip:
-                dst_ip_val = str(ip2int(dst_ip))
+                dst_ip_val = str(self.ip2int(dst_ip))
                 dst_mask_val = "0xffffffff"
             else:
                 dst_ip_val = None
