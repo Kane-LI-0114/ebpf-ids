@@ -57,6 +57,9 @@ class RuleManager:
         self.rules = []
         self.ebpf_configs = []
         self.parser = SnortRuleParser()
+        from ebpf_codegen import TCPRulesEBPFManager
+        self.tcp_codegen = TCPRulesEBPFManager()
+
 
     def load_rules(
         self,
@@ -85,7 +88,24 @@ class RuleManager:
         except Exception as e:
             print(f"加载失败: {e} (规则文件: {file_path})")
 
+    def generate_ebpf_code(self):
+        return self.tcp_codegen.generate_all_code()
+    
+    def load_tcp_rules(self):
+    # Load all rules first
+        self.load_rules()
+    
+    # Filter TCP rules (protocol_num == 6) and add to code generator
+        tcp_count = 0
+        for config in self.ebpf_configs:
+            if config.get("protocol_num") == 6:  # TCP only
+                self.tcp_codegen.add_rule(config)
+                tcp_count += 1
+    
+        print(f"✓ 已加载 {tcp_count} 条 TCP 规则到代码生成器")
+        return tcp_count
 
+    
     def parse_rule(self, rule_line):
         """解析单条规则"""
         if isinstance(rule_line, str):
@@ -107,6 +127,22 @@ class RuleManager:
     def get_rules(self):
         """获取所有规则"""
         return self.rules
+    def debug_print_rules(self):
+        """打印已解析的规则及生成的 eBPF 配置"""
+        print("\n" + "=" * 60)
+        print("已解析的 Snort 规则 与 eBPF 配置预览")
+        print("=" * 60)
+        for idx, (rule, cfg) in enumerate(zip(self.rules, self.ebpf_configs), start=1):
+            print(f"\n[规则 #{idx}] 原始解析结果:")
+            print(rule)
+            print(f"\n[规则 #{idx}] 对应 eBPF 配置:")
+            # 如果 ebpf_config 是 dict 或 list，使用 JSON 格式输出更清晰
+            try:
+                print(json.dumps(cfg, ensure_ascii=False, indent=2))
+            except TypeError:
+                # 不可 JSON 序列化时退回到 pprint
+                print(cfg)
+        print("\n" + "=" * 60)
 
 class EventHandler:
     """事件处理器"""
@@ -183,24 +219,44 @@ class IDSManager:
         self.default_rule_file = self.project_root / "snort3-community.rules"
 
     def load_ebpf_program(self):
-        """加载 eBPF 程序"""
-        kernel_code_path = os.path.join(
+        try:
+            print("正在生成 TCP 规则的 eBPF 代码...")
+        
+        # Step 1: Generate TCP rule eBPF code
+            result = self.rule_manager.tcp_codegen.generate_all_code()
+            print(f"✓ 已生成 {result['count']} 条 TCP 规则的 eBPF 代码")
+        
+        # Step 2: Export generated code to file
+            kernel_code_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "kernel",
-            "ids_ebpf.c"
-        )
-
-        try:
-            print(f"正在加载 eBPF 程序: {kernel_code_path}")
+            "tcp_rules.c"  # Changed from "ids_ebpf.c" to "tcp_rules.c"
+            )
+            self.rule_manager.tcp_codegen.export_code(kernel_code_path)
+            print(f"✓ 已导出 eBPF 代码到: {kernel_code_path}")
+        
+        # Step 3: Export metadata for reference
+            metadata_path = kernel_code_path.replace(".c", "_metadata.json")
+            self.rule_manager.tcp_codegen.export_metadata(metadata_path)
+            print(f"✓ 已导出规则元数据到: {metadata_path}")
+        
+        # Step 4: Read the generated code
             with open(kernel_code_path, 'r') as f:
-                kernel_code = f.read()
-            print("编译 eBPF 程序...")
-            # self.bpf = BPF(text=kernel_code)
+             kernel_code = f.read()
+        
+        # Step 5: Compile eBPF code
+            print("正在编译 eBPF 程序...")
+            from bcc import BPF
+            self.bpf = BPF(text=kernel_code)
             print("✓ eBPF 程序编译成功")
+        
+            return True
+        
         except Exception as e:
-            print(f"✗ 加载 eBPF 程序失败: {e}")
-            return False
-        return True
+               print(f"✗ 加载 eBPF 程序失败: {e}")
+               import traceback
+               traceback.print_exc()  # Print full error traceback for debugging
+               return False
 
     def attach_probes(self):
         """附加探针到网络接口"""
@@ -217,27 +273,24 @@ class IDSManager:
             return False
 
     def initialize(self):
-        """初始化 IDS 系统"""
         print(f"初始化 eBPF IDS 系统...")
-        print(f"规则目录: {self.rules_dir}")
-        print(f"网络接口: {self.interface}")
-
-        # 加载规则
-        self.rule_manager.load_rules()
-        print(f"✓ 已加载 {len(self.rule_manager.rules)} 条规则")
-
-        # 加载 eBPF 程序
+    
+    # Load TCP rules and prepare code generator
+        tcp_count = self.rule_manager.load_tcp_rules()
+    
+    # Load eBPF program (which will generate and compile code)
         if not self.load_ebpf_program():
-            return False
-
-        # 创建事件处理器
+         return False
+    
+    # Create event handler
         self.event_handler = EventHandler(self.rule_manager)
-
-        # 附加探针
+    
+    # Attach probes
         if not self.attach_probes():
-            return False
-
+         return False
+    
         return True
+
 
     def start(self):
         """启动 IDS 监控"""
