@@ -381,7 +381,7 @@ class IDSManager:
 
             # 5️⃣ 编译加载 eBPF
             self.bpf = BPF(
-                text=ebpf_source,
+                text=ebpf_source.encode('utf-8'),
                 cflags=[
                     "-I/usr/include",
                     "-I/usr/include/bpf",
