@@ -227,8 +227,17 @@ class EventHandler:
         protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
         protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
         
-        # 调试输出：打印所有捕获的包
-        print(f"[调试] 事件#{self.event_count} | {protocol_name} | {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} | Payload: {event.payload_len}B")
+        # 调试输出：降低频率，每100个包打印一次，或者特殊端口立即打印
+        should_print = False
+        if event.protocol == 6:  # TCP
+            # SSH, HTTP, HTTPS 等重要端口立即打印
+            if event.dst_port in [22, 80, 443, 8080, 21, 23, 3306, 5432]:
+                should_print = True
+        elif event.protocol == 1:  # ICMP
+            should_print = (self.icmp_count % 10 == 1)  # ICMP 每10个打印一次
+        
+        if should_print or self.event_count % 100 == 0:
+            print(f"[调试] 事件#{self.event_count} | {protocol_name} | {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} | Payload: {event.payload_len}B")
         
         # 匹配规则
         matched_rules = self.rule_manager.match_rule(event)
