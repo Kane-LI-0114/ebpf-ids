@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
+
 # -*- coding: utf-8 -*-
+
 """
 OOP-Based eBPF Code Generator for Snort Rules
+
 Breaks rules into small, manageable pieces for kernel deployment
 
 Architecture:
+
 1. RulePattern classes - Analyze and classify rules
 2. CodeGenerator classes - Generate focused eBPF C code
 3. RuleBatcher - Group rules into deployable batches (5, 10, 20...)
 4. DeploymentManager - Handle progressive kernel loading
 
 Design Principles:
+
 - Keep each eBPF function small (<1KB)
 - Group related rules together
 - Support $EXTERNAL_NET and $HOME_NET variable substitution
@@ -34,17 +39,19 @@ class ProtocolType(Enum):
     ICMP = 1
     OTHER = 0
 
+
 class FlowDirection(Enum):
     TO_SERVER = "to_server"
     TO_CLIENT = "to_client"
     STATELESS = "stateless"
     UNKNOWN = "unknown"
 
+
 @dataclass
 class IPConfig:
     """Configuration for IP address handling"""
-    home_net: str = "10.0.0.0/8"  # Default private network
-    external_net: str = "0.0.0.0/0"  # Any external
+    home_net: str = "10.0.0.0/8"       # Default private network
+    external_net: str = "0.0.0.0/0"    # Any external
     telnet_servers: str = "10.0.0.0/8"
     http_servers: str = "10.0.0.0/8"
     http_ports: str = "80,443,8080"
@@ -62,6 +69,7 @@ class IPConfig:
         }
         return mapping.get(var, var)
 
+
 @dataclass
 class PortSpec:
     """Represents port specification"""
@@ -69,23 +77,29 @@ class PortSpec:
     value: Union[int, Tuple[int, int], List[int], str, None] = None
 
     @classmethod
-    def from_rule(cls, port_obj: dict) -> Optional['PortSpec']:
+    def from_rule(cls, port_obj: dict) -> Optional["PortSpec"]:
         if not port_obj:
             return None
+
         if isinstance(port_obj, (int, str)):
-            return cls(port_type='single', value=port_obj)
+            return cls(port_type="single", value=port_obj)
+
         if isinstance(port_obj, dict):
-            port_type = port_obj.get('type', 'single')
+            port_type = port_obj.get("type", "single")
             value = None
-            if port_type == 'range':
-                if 'start' in port_obj and 'end' in port_obj:
-                    value = (port_obj['start'], port_obj['end'])
-            elif port_type == 'list':
-                value = port_obj.get('ports')
+
+            if port_type == "range":
+                if "start" in port_obj and "end" in port_obj:
+                    value = (port_obj["start"], port_obj["end"])
+            elif port_type == "list":
+                value = port_obj.get("ports")
             else:  # 'single' or default
-                value = port_obj.get('port')
+                value = port_obj.get("port")
+
             return cls(port_type=port_type, value=value)
+
         return None
+
 
 @dataclass
 class RulePattern:
@@ -103,12 +117,14 @@ class RulePattern:
     priority: int = 3
     classtype: str = "unknown"
 
+
 # ============================================================================
 # 2. RULE PATTERN ANALYZERS (OOP)
 # ============================================================================
 
 class BaseRuleAnalyzer(ABC):
     """Base analyzer for different rule types"""
+
     def __init__(self, ip_config: IPConfig = None):
         self.ip_config = ip_config or IPConfig()
 
@@ -130,8 +146,10 @@ class BaseRuleAnalyzer(ABC):
         """Resolve IP variables"""
         return self.ip_config.resolve_variable(ip_str)
 
+
 class TCPRuleAnalyzer(BaseRuleAnalyzer):
     """Analyzes TCP-specific rules"""
+
     def can_handle(self, rule: Dict) -> bool:
         return rule.get("protocol_num") == 6
 
@@ -148,11 +166,13 @@ class TCPRuleAnalyzer(BaseRuleAnalyzer):
             content=rule.get("content"),
             flow=rule.get("flow", ""),
             priority=rule.get("priority", 3),
-            classtype=rule.get("classtype", "unknown")
+            classtype=rule.get("classtype", "unknown"),
         )
+
 
 class UDPRuleAnalyzer(BaseRuleAnalyzer):
     """Analyzes UDP-specific rules"""
+
     def can_handle(self, rule: Dict) -> bool:
         return rule.get("protocol_num") == 17
 
@@ -168,11 +188,13 @@ class UDPRuleAnalyzer(BaseRuleAnalyzer):
             content=rule.get("content"),
             flow=rule.get("flow", ""),
             priority=rule.get("priority", 3),
-            classtype=rule.get("classtype", "unknown")
+            classtype=rule.get("classtype", "unknown"),
         )
+
 
 class ICMPRuleAnalyzer(BaseRuleAnalyzer):
     """Analyzes ICMP-specific rules"""
+
     def can_handle(self, rule: Dict) -> bool:
         return rule.get("protocol_num") == 1
 
@@ -188,11 +210,13 @@ class ICMPRuleAnalyzer(BaseRuleAnalyzer):
             content=rule.get("content"),
             flow=rule.get("flow", ""),
             priority=rule.get("priority", 3),
-            classtype=rule.get("classtype", "unknown")
+            classtype=rule.get("classtype", "unknown"),
         )
+
 
 class RulePatternFactory:
     """Factory for creating appropriate analyzers"""
+
     def __init__(self, ip_config: IPConfig = None):
         self.ip_config = ip_config or IPConfig()
         self.analyzers = [
@@ -208,16 +232,19 @@ class RulePatternFactory:
                 return analyzer.analyze(rule)
         return None
 
+
 # ============================================================================
 # 3. EBPF CODE GENERATORS (OOP)
 # ============================================================================
 
-C_HEADER_DEFINITIONS = """
+C_HEADER_DEFINITIONS = r"""
+#include <uapi/linux/ptrace.h>
+#include <net/sock.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
-#include <uapi/linux/bpf.h>
+#include <bcc/proto.h>
 
 // Data structure to send alerts from kernel to user space
 struct alert_event_t {
@@ -234,8 +261,10 @@ struct alert_event_t {
 BPF_PERF_OUTPUT(alerts);
 """
 
+
 class BaseEBPFGenerator(ABC):
     """Base class for eBPF code generation"""
+
     def __init__(self, batch_id: int = 0):
         self.batch_id = batch_id
         self.rules: List[RulePattern] = []
@@ -257,8 +286,10 @@ class BaseEBPFGenerator(ABC):
         """Check if generator is full (implementation-specific)"""
         return False
 
+
 class TCPRuleEBPFGenerator(BaseEBPFGenerator):
     """Generates eBPF code for TCP rules"""
+
     MAX_RULES_PER_FUNCTION = 10
 
     def add_rule(self, pattern: RulePattern) -> bool:
@@ -268,62 +299,64 @@ class TCPRuleEBPFGenerator(BaseEBPFGenerator):
         return True
 
     def generate_function(self) -> str:
-        """Generate eBPF function for TCP rules"""
+        """Generate eBPF function for TCP rules (socket filter style)"""
         if not self.rules:
             return ""
 
         func_name = f"tcp_rules_batch_{self.batch_id}"
         rules_code = self._generate_rule_checks()
 
-        func_logic = f'''
+        func_logic = f"""
 // eBPF Function: TCP Rules Batch {self.batch_id} | Rules: {len(self.rules)}
 static __always_inline int {func_name}(struct __sk_buff *skb) {{
-    void *data_end = (void *)(long)skb->data_end;
-    void *data = (void *)(long)skb->data;
-    struct ethhdr *eth = data;
+    u8 *cursor = 0;
 
-    if ((void *)(eth + 1) > data_end) return 0;
-    if (eth->h_proto != htons(ETH_P_IP)) return 0;
+    // Parse Ethernet header
+    struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
+    if (!(ethernet->type == ETH_P_IP)) {{
+        return 0;
+    }}
 
-    struct iphdr *ip = (void *)(eth + 1);
-    if ((void *)(ip + 1) > data_end) return 0;
-    if (ip->protocol != IPPROTO_TCP) return 0;
+    // Parse IPv4 header
+    struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
+    if (ip->nextp != IPPROTO_TCP) {{
+        return 0;
+    }}
 
-    struct tcphdr *tcp = (void *)(ip + 1);
-    if ((void *)(tcp + 1) > data_end) return 0;
+    // Parse TCP header
+    struct tcp_t *tcp = cursor_advance(cursor, sizeof(*tcp));
 
-    uint16_t src_port = ntohs(tcp->source);
-    uint16_t dst_port = ntohs(tcp->dest);
-    uint32_t src_ip = ip->saddr;
-    uint32_t dst_ip = ip->daddr;
+    u16 src_port = tcp->src_port;
+    u16 dst_port = tcp->dst_port;
+    u32 src_ip   = ip->src;
+    u32 dst_ip   = ip->dst;
 
-    {rules_code}
-
+{rules_code}
     return 0;
 }}
-'''
+"""
         return C_HEADER_DEFINITIONS + func_logic
+
     def _generate_rule_checks(self) -> str:
         """Generate port and content checking logic"""
         checks = [self._generate_single_rule_check(rule) for rule in self.rules]
-        # Corrected line:
         return "\n".join(checks)
 
     def _generate_single_rule_check(self, rule: RulePattern) -> str:
         """Generate check for single TCP rule"""
-        conditions = []
+        conditions: List[str] = []
+
         if rule.src_port and rule.src_port.value is not None:
             conditions.append(self._generate_port_check(rule.src_port, "src_port"))
         if rule.dst_port and rule.dst_port.value is not None:
             conditions.append(self._generate_port_check(rule.dst_port, "dst_port"))
-        
+
         # Combine all conditions with &&
         full_condition = " && ".join(filter(None, conditions))
         if not full_condition:
             full_condition = "1"
 
-
-        alert_block = f'''
+        alert_block = f"""
         struct alert_event_t event = {{0}};
         event.rule_id = {rule.sid};
         event.priority = {rule.priority};
@@ -333,13 +366,14 @@ static __always_inline int {func_name}(struct __sk_buff *skb) {{
         event.dst_port = dst_port;
         __builtin_memcpy(&event.msg, "{rule.msg[:249]}", {min(len(rule.msg), 249)});
         alerts.perf_submit(skb, &event, sizeof(event));
-'''
-        return f'''
+"""
+
+        return f"""
     // Rule SID {rule.sid}: {rule.msg}
     if ({full_condition}) {{
-        {alert_block}
+{alert_block}
     }}
-'''
+"""
 
     def _generate_port_check(self, port_spec: PortSpec, port_var_name: str) -> str:
         if port_spec.port_type == "single":
@@ -351,8 +385,10 @@ static __always_inline int {func_name}(struct __sk_buff *skb) {{
             return " || ".join([f"{port_var_name} == {p}" for p in port_spec.value])
         return ""
 
+
 class UDPRuleEBPFGenerator(BaseEBPFGenerator):
     """Generates eBPF code for UDP rules"""
+
     MAX_RULES_PER_FUNCTION = 10
 
     def add_rule(self, pattern: RulePattern) -> bool:
@@ -362,41 +398,46 @@ class UDPRuleEBPFGenerator(BaseEBPFGenerator):
         return True
 
     def generate_function(self) -> str:
-        """Generate eBPF function for UDP rules"""
+        """Generate eBPF function for UDP rules (socket filter style)"""
         if not self.rules:
             return ""
 
         func_name = f"udp_rules_batch_{self.batch_id}"
+        # Placeholder for UDP rule checks; you can mirror TCP logic when you add UDP rules.
         rules_code = "// TODO: Add UDP rule checks here"
 
-        func_logic = f'''
+        func_logic = f"""
 // eBPF Function: UDP Rules Batch {self.batch_id} | Rules: {len(self.rules)}
 static __always_inline int {func_name}(struct __sk_buff *skb) {{
-    void *data_end = (void *)(long)skb->data_end;
-    void *data = (void *)(long)skb->data;
-    struct ethhdr *eth = data;
+    u8 *cursor = 0;
 
-    if ((void *)(eth + 1) > data_end) return 0;
-    if (eth->h_proto != htons(ETH_P_IP)) return 0;
+    // Parse Ethernet header
+    struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
+    if (!(ethernet->type == ETH_P_IP)) {{
+        return 0;
+    }}
 
-    struct iphdr *ip = (void *)(eth + 1);
-    if ((void *)(ip + 1) > data_end) return 0;
-    if (ip->protocol != IPPROTO_UDP) return 0;
+    // Parse IPv4 header
+    struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
+    if (ip->nextp != IPPROTO_UDP) {{
+        return 0;
+    }}
 
-    struct udphdr *udp = (void *)(ip + 1);
-    if ((void *)(udp + 1) > data_end) return 0;
+    // Parse UDP header
+    struct udp_t *udp = cursor_advance(cursor, sizeof(*udp));
 
-    uint16_t src_port = ntohs(udp->source);
-    uint16_t dst_port = ntohs(udp->dest);
-    uint32_t src_ip = ip->saddr;
-    uint32_t dst_ip = ip->daddr;
+    u16 src_port = udp->src_port;
+    u16 dst_port = udp->dst_port;
+    u32 src_ip   = ip->src;
+    u32 dst_ip   = ip->dst;
 
     {rules_code}
 
     return 0;
 }}
-'''
+"""
         return C_HEADER_DEFINITIONS + func_logic
+
 
 # ============================================================================
 # 4. RULE BATCHER (OOP)
@@ -404,6 +445,7 @@ static __always_inline int {func_name}(struct __sk_buff *skb) {{
 
 class RuleBatcher:
     """Groups rules into manageable batches for kernel deployment"""
+
     def __init__(self, batch_size: int = 5, ip_config: IPConfig = None):
         self.batch_size = batch_size
         self.ip_config = ip_config or IPConfig()
@@ -412,18 +454,18 @@ class RuleBatcher:
 
     def load_rules_from_json(self, json_path: str) -> int:
         """Load rules from JSON file and create batches"""
-        with open(json_path, 'r') as f:
+        with open(json_path, "r") as f:
             rules_data = json.load(f)
-        
-        parsed_rules = []
+
+        parsed_rules: List[RulePattern] = []
         for rule_dict in rules_data:
             pattern = self.factory.analyze_rule(rule_dict)
             if pattern:
                 parsed_rules.append(pattern)
-        
+
         for i in range(0, len(parsed_rules), self.batch_size):
-            self.batches.append(parsed_rules[i:i + self.batch_size])
-        
+            self.batches.append(parsed_rules[i : i + self.batch_size])
+
         return len(parsed_rules)
 
     def get_batch(self, batch_num: int) -> Optional[List[RulePattern]]:
@@ -444,20 +486,21 @@ class RuleBatcher:
 
         tcp_gen = TCPRuleEBPFGenerator(batch_num)
         udp_gen = UDPRuleEBPFGenerator(batch_num)
-        
+
         for rule in batch:
             if rule.protocol_num == 6:
                 tcp_gen.add_rule(rule)
             elif rule.protocol_num == 17:
                 udp_gen.add_rule(rule)
-        
-        result = {}
+
+        result: Dict[str, str] = {}
         if tcp_gen.get_rule_count() > 0:
-            result['tcp'] = tcp_gen.generate_function()
+            result["tcp"] = tcp_gen.generate_function()
         if udp_gen.get_rule_count() > 0:
-            result['udp'] = udp_gen.generate_function()
-            
+            result["udp"] = udp_gen.generate_function()
+
         return result
+
 
 # ============================================================================
 # 5. DEPLOYMENT MANAGER & UTILS
@@ -465,6 +508,7 @@ class RuleBatcher:
 
 class DeploymentManager:
     """Manages progressive eBPF program deployment to kernel"""
+
     def __init__(self, json_path: str, batch_size: int = 5, ip_config: IPConfig = None):
         self.json_path = json_path
         self.batch_size = batch_size
@@ -484,8 +528,8 @@ class DeploymentManager:
         code_dict = self.batcher.generate_batch_code(batch_num)
         if code_dict:
             self.kernel_functions[batch_num] = code_dict
-            tcp_count = 1 if 'tcp' in code_dict else 0
-            udp_count = 1 if 'udp' in code_dict else 0
+            tcp_count = 1 if "tcp" in code_dict else 0
+            udp_count = 1 if "udp" in code_dict else 0
             print(f"✓ Generated code for batch {batch_num} ({tcp_count} TCP, {udp_count} UDP functions)")
             return True
         return False
@@ -496,12 +540,12 @@ class DeploymentManager:
         if not batch:
             return {}
         return {
-            'batch_num': batch_num,
-            'total_rules': len(batch),
-            'tcp_rules': sum(1 for r in batch if r.protocol_num == 6),
-            'udp_rules': sum(1 for r in batch if r.protocol_num == 17),
-            'icmp_rules': sum(1 for r in batch if r.protocol_num == 1),
-            'rules': [(r.sid, r.msg) for r in batch]
+            "batch_num": batch_num,
+            "total_rules": len(batch),
+            "tcp_rules": sum(1 for r in batch if r.protocol_num == 6),
+            "udp_rules": sum(1 for r in batch if r.protocol_num == 17),
+            "icmp_rules": sum(1 for r in batch if r.protocol_num == 1),
+            "rules": [(r.sid, r.msg) for r in batch],
         }
 
     def export_batch_code(self, batch_num: int, output_dir: str) -> bool:
@@ -509,14 +553,15 @@ class DeploymentManager:
         code_dict = self.kernel_functions.get(batch_num, {})
         if not code_dict:
             return False
-        
+
         os.makedirs(output_dir, exist_ok=True)
         for proto, code in code_dict.items():
             filename = os.path.join(output_dir, f"batch_{batch_num}_{proto}_rules.c")
-            with open(filename, 'w') as f:
+            with open(filename, "w") as f:
                 f.write(code)
             print(f"✓ Exported {filename}")
         return True
+
 
 if __name__ == "__main__":
     print("eBPF OOP Code Generator Module Loaded")
