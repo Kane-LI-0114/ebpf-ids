@@ -1,271 +1,179 @@
 #!/usr/bin/env python3
-# -- coding: utf-8 --
+# -*- coding: utf-8 -*-
+
+"""
+Refactored IDS Manager - Clean OOP Architecture
+Uses ebpf_oop_generator for progressive rule deployment
+Replaces all broken eBPF code with new OOP-based generator
+"""
 
 import os
-import sys
 import json
-import signal
-import socket
-import fcntl
-import struct
-import array
-from datetime import datetime
-from typing import Optional, Union
+import sys
 from pathlib import Path
+from typing import Optional, Dict, List
+from datetime import datetime
+import signal
 
-from bcc import BPF
-
-# Add project root to path
-sys.path.append(str(Path(__file__).resolve().parents[2]))
-
-from utils.snort_parser import SnortRuleParser
-from src.userspace.udp_codegen import UDPRulesEBPFManager
-
-
-# ---------------------------------------------------------------------------
-# Helper function to get the active network interface and its IP address.
-# ---------------------------------------------------------------------------
-def get_interface_and_ip():
-    """
-    Identifies the default network interface and its IPv4 address.
-    """
-    # Get all network interfaces
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        # This doesn't actually connect, but finds the interface used for the default route
-        s.connect(("8.8.8.8", 80))
-        ip_address = s.getsockname()[0]
-        
-        # Find the interface name associated with this IP
-        for iface in socket.if_nameindex():
-            ifaddrs = socket.getaddrinfo(ip_address, None, socket.AF_INET)
-            if ifaddrs and ifaddrs[0][4][0] == ip_address:
-                return iface[1], ip_address
-
-    except Exception as e:
-        print(f"Could not determine the active interface and IP: {e}")
-        # Fallback for environments where the above method fails
-        try:
-            with open("/proc/net/dev") as f:
-                lines = f.readlines()
-                for line in lines[2:]:
-                    iface = line.split(":")[0].strip()
-                    if iface != "lo":
-                        return iface, "0.0.0.0" # Unable to determine IP
-        except:
-            return "eth0", "0.0.0.0" # Default fallback
-    finally:
-        s.close()
-
-    return "eth0", "0.0.0.0" # Default if no interface is found
+# Import the OOP generator
+from ebpf_oop_generator import (
+    DeploymentManager, RuleBatcher, IPConfig, 
+    TCPRuleEBPFGenerator, UDPRuleEBPFGenerator,
+    RulePatternFactory
+)
 
 
-# ---------------------------------------------------------------------------
-# Main IDS Manager Class
-# ---------------------------------------------------------------------------
-class IDSManager:
-    """
-    Manages the eBPF-based IDS, including rule loading, code generation,
-    and event handling.
-    """
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+class IDSConfig:
+    """Centralized IDS configuration"""
+    
     def __init__(self):
-        self.bpf: Optional[BPF] = None
-        self.udp_rules_manager = UDPRulesEBPFManager()
-        self.rule_manager = RuleManager(rules_dir=PROJECT_ROOT)
-        self.event_handler = EventHandler(self.rule_manager)
-        self.sock = None  # To hold the raw socket and prevent it from being garbage-collected
-        self.iface: Optional[str] = None
-
-    def init_ids(self, iface: Optional[str] = None):
-        """
-        Initializes the IDS:
-        1. Loads Snort rules and prepares them for the EventHandler.
-        2. Generates and loads the eBPF C code for UDP rules.
-        3. Compiles and attaches the eBPF program to a socket.
-        """
-        try:
-            # 1. Load Snort rules for the EventHandler (to map SIDs to messages)
-            print("✓ Loading Snort rules...")
-            self.rule_manager.load_rules()
-            
-            # 2. Load UDP rules and generate the eBPF C code
-            self.load_udp_rules()
-            self.generate_udp_rules_code()
-
-            # 3. Determine the interface and load the eBPF program
-            if iface:
-                self.iface = iface
-            else:
-                self.iface, victim_ip = get_interface_and_ip()
-                print(f"✓ Automatically selected interface '{self.iface}' with IP '{victim_ip}'")
-
-            self.load_ebpf_program(iface=self.iface)
-            print("✓ IDS initialization complete")
-
-        except Exception as e:
-            print(f"✗ Error during IDS initialization: {e}")
-            raise
-
-    def load_udp_rules(self, json_path: str = SNORT_RULES_JSON):
-        """
-        Loads UDP rules from a JSON file.
-        """
-        with open(json_path, "r") as f:
-            all_rules = json.load(f)
+        # Project paths
+        self.current_dir = Path(__file__).resolve().parent
+        self.project_root = self.current_dir.parent.parent
+        self.kernel_dir = self.project_root / "src" / "kernel"
+        self.userspace_dir = self.project_root / "src" / "userspace" / "ebpf-ids"
+        self.snort_json = self.project_root / "snort_rules_ebpf.json"
         
-        udp_count = 0
-        for rule in all_rules:
-            if rule.get("protocol_num") == 17:
-                if self.udp_rules_manager.add_rule(rule):
-                    udp_count += 1
+        # Output paths
+        self.output_dir = self.userspace_dir / "generated_ebpf"
+        self.alerts_log = self.userspace_dir / "ids_alerts.log"
         
-        print(f"✓ Loaded {udp_count} UDP rules")
-        return udp_count
-
-    def generate_udp_rules_code(self):
-        """
-        Generates the eBPF code for UDP rules.
-        """
-        print("Generating UDP rules eBPF code...")
-        result = self.udp_rules_manager.generate_all_code(output_dir=KERNEL_DIR)
-        print(f"✓ Generated {result['count']} UDP rules")
-        return result
-
-    def load_ebpf_program(self, iface: Optional[str] = None):
-        """
-        Loads the eBPF socket filter program and attaches it to a raw socket.
-        """
-        print("Compiling eBPF program...")
-        if not os.path.isfile(UDP_RULES_C_PATH):
-            raise FileNotFoundError(f"eBPF C code not found at: {UDP_RULES_C_PATH}")
-
-        with open(UDP_RULES_C_PATH, "r") as f:
-            kernel_code = f.read()
-
-        try:
-            # Change to project root for bcc to handle includes correctly
-            os.chdir(PROJECT_ROOT)
-            
-            # Initialize BPF with the generated C code
-            self.bpf = BPF(text=kernel_code)
-            
-            # Load and attach the socket filter
-            fn = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
-            
-            # Attach the filter to a raw socket
-            self.sock = self.bpf.attach_raw_socket(fn, iface)
-            
-            print(f"✓ eBPF program compiled and attached as a socket filter to interface '{iface}'")
-
-        except Exception as e:
-            print(f"✗ Failed to load eBPF program. CWD: {os.getcwd()}")
-            print(f"  Error: {e}")
-            raise
-
-    def set_up_event_buffers(self):
-        """
-        Sets up the perf buffer for receiving alerts from the kernel.
-        """
-        if self.bpf is None:
-            raise RuntimeError("BPF program not loaded.")
+        # eBPF configuration
+        self.batch_size = 5  # Start with 5 rules per batch
+        self.max_rules_per_function = 10
         
-        try:
-            self.bpf["alerts"].open_perf_buffer(self.event_handler.handle_alert)
-            print("✓ Opened 'alerts' perf buffer")
-        except KeyError:
-            print("✗ Warning: 'alerts' perf buffer not found in eBPF map.")
-
-    def run(self):
-        """
-        Starts polling the perf buffer for events.
-        """
-        if self.bpf is None:
-            raise RuntimeError("BPF program not loaded.")
-
-        print("Starting to monitor for kernel alerts, press Ctrl+C to exit...")
-
-        # Set up signal handler for graceful exit
-        def handle_sigint(signum, frame):
-            raise KeyboardInterrupt
-
-        signal.signal(signal.SIGINT, handle_sigint)
-
-        try:
-            while True:
-                self.bpf.perf_buffer_poll()
-        except KeyboardInterrupt:
-            print("\n✓ IDS stopped by user.")
-        finally:
-            self.cleanup()
-
-    def cleanup(self):
-        """
-        Cleans up resources, such as closing the raw socket.
-        """
-        print("Cleaning up resources...")
-        try:
-            if self.sock is not None:
-                self.sock.close()
-                print("✓ Closed raw socket")
-        except Exception as e:
-            print(f"✗ Warning: Failed to close raw socket: {e}")
+        # IP configuration
+        self.ip_config = IPConfig(
+    home_net="10.10.0.0/16",        # Your GCP VPC subnet
+    external_net="0.0.0.0/0"        )
 
 
-# ---------------------------------------------------------------------------
-# Rule and Event Handling Classes
-# ---------------------------------------------------------------------------
+# ============================================================================
+# RULE MANAGER (OOP)
+# ============================================================================
+
 class RuleManager:
-    def __init__(self, rules_dir: str):
-        self.rules_dir = Path(rules_dir)
-        self.rules = []
-        self.ebpf_configs = []
-        self.parser = SnortRuleParser()
-        self.sid_to_rule = {}
-
-    def load_rules(self, rule_file: Optional[Union[str, Path]] = None):
-        if rule_file is None:
-            project_root = Path(__file__).resolve().parents[2]
-            file_path = project_root / "snort3-community.rules"
-        else:
-            file_path = Path(rule_file).expanduser().resolve()
+    """Manages rule loading, analysis, and eBPF code generation"""
+    
+    def __init__(self, config: IDSConfig):
+        self.config = config
+        self.deployment_manager: Optional[DeploymentManager] = None
+        self.rule_count = 0
+        self.batch_count = 0
+        
+    def initialize(self) -> bool:
+        """Initialize rule manager and load rules"""
+        try:
+            if not self.config.snort_json.exists():
+                print(f"❌ Snort rules JSON not found: {self.config.snort_json}")
+                return False
+                
+            print(f"📂 Loading rules from: {self.config.snort_json}")
+            
+            self.deployment_manager = DeploymentManager(
+                str(self.config.snort_json),
+                batch_size=self.config.batch_size,
+                ip_config=self.config.ip_config
+            )
+            
+            self.rule_count = self.deployment_manager.load_and_batch_rules()
+            self.batch_count = self.deployment_manager.batcher.get_batch_count()
+            
+            return True
+        except Exception as e:
+            print(f"❌ Failed to initialize rule manager: {e}")
+            return False
+    
+    def generate_batch_code(self, batch_num: int) -> bool:
+        """Generate eBPF code for specific batch"""
+        if not self.deployment_manager:
+            return False
+            
+        return self.deployment_manager.generate_batch_code(batch_num)
+    
+    def export_generated_code(self) -> bool:
+        """Export all generated code to output directory"""
+        if not self.deployment_manager:
+            return False
         
         try:
-            parsed_rules = self.parser.parse_file(str(file_path))
-            for rule in parsed_rules:
-                if self.validate_rule(rule):
-                    self.rules.append(rule)
-                    ebpf_config = self.parser.to_ebpf_config(rule)
-                    self.ebpf_configs.append(ebpf_config)
-                    if "sid" in ebpf_config:
-                        self.sid_to_rule[ebpf_config["sid"]] = {
-                            "msg": ebpf_config.get("msg", "Unknown"),
-                            "priority": ebpf_config.get("priority", 3),
-                            "classtype": ebpf_config.get("classtype", "unknown"),
-                        }
+            self.config.output_dir.mkdir(parents=True, exist_ok=True)
+            
+            for i in range(self.batch_count):
+                if self.generate_batch_code(i):
+                    self.deployment_manager.export_batch_code(
+                        i, 
+                        str(self.config.output_dir)
+                    )
+            
+            return True
         except Exception as e:
-            print(f"Could not parse rule file: {file_path}. Error: {e}")
+            print(f"❌ Export failed: {e}")
+            return False
+    
+    def get_batch_info(self, batch_num: int) -> Dict:
+        """Get information about specific batch"""
+        if not self.deployment_manager:
+            return {}
+        return self.deployment_manager.get_batch_info(batch_num)
+    
+    def get_test_command(self, batch_num: int) -> str:
+        """Get nmap test command for batch"""
+        if not self.deployment_manager:
+            return ""
+        return self.deployment_manager.generate_test_command(batch_num)
+    
+    def print_summary(self):
+        """Print summary of all loaded rules and batches"""
+        if not self.deployment_manager:
+            return
+            
+        print("\n" + "=" * 80)
+        print("RULE LOADING SUMMARY")
+        print("=" * 80)
+        print(f"Total Rules Loaded: {self.rule_count}")
+        print(f"Batch Size: {self.config.batch_size}")
+        print(f"Total Batches: {self.batch_count}")
+        print()
+        
+        for i in range(min(self.batch_count, 10)):  # Show first 10 batches
+            info = self.get_batch_info(i)
+            if info:
+                print(f"Batch {i}: {info['total_rules']} rules "
+                      f"(TCP: {info['tcp_rules']}, UDP: {info['udp_rules']}, ICMP: {info['icmp_rules']})")
 
-    @staticmethod
-    def validate_rule(rule: dict) -> bool:
-        required_fields = ["action", "protocol", "src_ip", "src_port", "direction", "dst_ip", "dst_port"]
-        return all(field in rule for field in required_fields)
 
+# ============================================================================
+# EVENT HANDLER (OOP)
+# ============================================================================
 
 class EventHandler:
-    def __init__(self, rule_manager: RuleManager, log_file: str = "ids-alerts.log"):
-        self.rule_manager = rule_manager
-        self.alert_count = 0
+    """Handles eBPF perf buffer events"""
+    
+    def __init__(self, log_file: str):
         self.log_file = log_file
-        
-        # Initialize log file
-        with open(self.log_file, "a", encoding="utf-8") as f:
-            f.write("=" * 80 + "\n")
-            f.write(f" IDS Alert Log - Session started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("=" * 80 + "\n")
-
+        self.event_count = 0
+        self.alert_count = 0
+        self._init_log()
+    
+    def _init_log(self):
+        """Initialize alert log file"""
+        try:
+            with open(self.log_file, 'a') as f:
+                f.write("\n" + "=" * 80 + "\n")
+                f.write(f"Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 80 + "\n\n")
+        except Exception as e:
+            print(f"⚠️ Failed to initialize log file: {e}")
+    
     def handle_alert(self, cpu, data, size):
+        """Handle eBPF alert event"""
         import ctypes as ct
-
+        
         class AlertEvent(ct.Structure):
             _fields_ = [
                 ("rule_id", ct.c_uint32),
@@ -277,86 +185,304 @@ class EventHandler:
                 ("msg", ct.c_char * 256),
             ]
         
-        alert = ct.cast(data, ct.POINTER(AlertEvent)).contents
-        self.alert_count += 1
-
-        src_ip = self.format_ip(alert.src_ip)
-        dst_ip = self.format_ip(alert.dst_ip)
-        
-        rule_info = self.rule_manager.sid_to_rule.get(alert.rule_id, {})
-        rule_msg = alert.msg.decode('utf-8', errors='ignore').rstrip('\x00')
-
-        alert_info = {
-            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
-            "alert_id": self.alert_count,
-            "rule_id": alert.rule_id,
-            "priority": alert.priority,
-            "message": rule_msg or rule_info.get("msg", "Unknown"),
-            "classification": rule_info.get("classtype", "unknown"),
-            "src_ip": src_ip,
-            "src_port": alert.src_port,
-            "dst_ip": dst_ip,
-            "dst_port": alert.dst_port,
-            "protocol": "UDP",
-        }
-        
-        self.log_alert(alert_info)
-
-    @staticmethod
-    def format_ip(ip_int: int) -> str:
-        return ".".join(map(str, [ip_int & 0xFF, (ip_int >> 8) & 0xFF, (ip_int >> 16) & 0xFF, (ip_int >> 24) & 0xFF]))
-
-    def log_alert(self, alert_info: dict):
-        alert_line = (
-            f"ALERT! (Priority: {alert_info['priority']})\n"
-            f"  Timestamp: {alert_info['timestamp']} | Alert ID: {alert_info['alert_id']}\n"
-            f"  Rule ID: {alert_info['rule_id']} | Priority: {alert_info['priority']}\n"
-            f"  Message: {alert_info['message']}\n"
-            f"  Classification: {alert_info['classification']}\n"
-            f"  Connection: {alert_info['src_ip']}:{alert_info['src_port']} -> {alert_info['dst_ip']}:{alert_info['dst_port']}\n"
-            f"  Protocol: {alert_info['protocol']}\n"
-            f"-"*80
-        )
-        print(alert_line)
-        
         try:
-            with open(self.log_file, "a", encoding="utf-8") as f:
+            alert = ct.cast(data, ct.POINTER(AlertEvent)).contents
+            self.alert_count += 1
+            
+            src_ip = self._format_ip(alert.src_ip)
+            dst_ip = self._format_ip(alert.dst_ip)
+            msg = alert.msg.decode('utf-8', errors='ignore').rstrip('\x00')
+            
+            alert_line = (
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"Alert #{self.alert_count}: Rule {alert.rule_id} (Priority {alert.priority})\n"
+                f"  {msg}\n"
+                f"  {src_ip}:{alert.src_port} → {dst_ip}:{alert.dst_port}\n"
+            )
+            
+            print(alert_line)
+            self._log_alert(alert_line)
+        except Exception as e:
+            print(f"❌ Error handling alert: {e}")
+    
+    @staticmethod
+    def _format_ip(ip_int: int) -> str:
+        """Format IP from integer"""
+        return ".".join([
+            str((ip_int >> (i * 8)) & 0xFF) for i in range(4)
+        ])
+    
+    def _log_alert(self, alert_line: str):
+        """Write alert to log file"""
+        try:
+            with open(self.log_file, 'a') as f:
                 f.write(alert_line + "\n")
         except Exception as e:
-            print(f"Warning: Failed to write alert to log file: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Paths and Main Execution
-# ---------------------------------------------------------------------------
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, '..', '..'))
-KERNEL_DIR = os.path.join(PROJECT_ROOT, "src", "kernel")
-USERSPACE_DIR = os.path.join(PROJECT_ROOT, "src", "userspace")
-
-UDP_RULES_C_PATH = os.path.join(KERNEL_DIR, "udp_rules_generated.c")
-UDP_RULES_METADATA_PATH = os.path.join(KERNEL_DIR, "udp_rules_metadata.json")
-SNORT_RULES_JSON = os.path.join(PROJECT_ROOT, "snort_rules.ebpf.json")
-
-def main():
-    """
-    Main function to run the IDS.
-    """
-    try:
-        # Change to project root to resolve relative paths
-        os.chdir(PROJECT_ROOT)
-    except Exception:
-        pass
+            print(f"⚠️ Failed to write alert log: {e}")
     
-    manager = IDSManager()
+    def get_stats(self) -> Dict:
+        """Get alert statistics"""
+        return {
+            "total_events": self.event_count,
+            "total_alerts": self.alert_count,
+        }
+
+
+# ============================================================================
+# DEPLOYMENT CONTROLLER (OOP)
+# ============================================================================
+
+class DeploymentController:
+    """Controls eBPF program deployment to kernel"""
     
-    # Determine the interface to use (you can pass one from the command line)
-    victim_iface = sys.argv[1] if len(sys.argv) > 1 else None
+    def __init__(self, config: IDSConfig):
+        self.config = config
+        self.rule_manager = RuleManager(config)
+        self.event_handler = EventHandler(str(config.alerts_log))
+        self.current_batch = 0
+        
+    def initialize(self) -> bool:
+        """Initialize IDS system"""
+        print("🚀 Initializing IDS System...")
+        
+        if not self.rule_manager.initialize():
+            return False
+        
+        self.rule_manager.print_summary()
+        return True
     
-    manager.init_ids(iface=victim_iface)
-    manager.set_up_event_buffers()
-    manager.run()
+    def prepare_batch(self, batch_num: int) -> bool:
+        """Prepare eBPF code for specific batch"""
+        if batch_num >= self.rule_manager.batch_count:
+            print(f"❌ Batch {batch_num} out of range (max: {self.rule_manager.batch_count - 1})")
+            return False
+        
+        print(f"\n📦 Preparing Batch {batch_num}...")
+        
+        if self.rule_manager.generate_batch_code(batch_num):
+            info = self.rule_manager.get_batch_info(batch_num)
+            print(f"✓ Generated code for {info['total_rules']} rules")
+            
+            # Show test command
+            test_cmd = self.rule_manager.get_test_command(batch_num)
+            if test_cmd:
+                print(f"✓ Test command: {test_cmd}")
+            
+            return True
+        
+        return False
+    
+    def deploy_batch_progressive(self, start_batch: int = 0, num_batches: int = 1) -> bool:
+        """Deploy batches progressively (5, 10, 20, etc.)"""
+        print(f"\n📡 Progressive Deployment Starting...")
+        print(f"Starting from batch {start_batch}, loading {num_batches} batch(es)\n")
+        
+        for i in range(start_batch, min(start_batch + num_batches, self.rule_manager.batch_count)):
+            if not self.prepare_batch(i):
+                print(f"❌ Failed to prepare batch {i}")
+                return False
+            
+            self.current_batch = i
+            print(f"✓ Batch {i} ready for deployment\n")
+        
+        return True
+    
+    def export_all_code(self) -> bool:
+        """Export all generated eBPF code"""
+        print("\n💾 Exporting all generated code...")
+        
+        if self.rule_manager.export_generated_code():
+            print(f"✓ Exported to: {self.config.output_dir}")
+            return True
+        
+        return False
+    
+    def get_deployment_status(self) -> Dict:
+        """Get current deployment status"""
+        return {
+            "initialized": self.rule_manager.deployment_manager is not None,
+            "total_rules": self.rule_manager.rule_count,
+            "total_batches": self.rule_manager.batch_count,
+            "current_batch": self.current_batch,
+            "alerts_log": str(self.config.alerts_log),
+        }
+
+
+# ============================================================================
+# MAIN IDS MANAGER
+# ============================================================================
+
+class IDSManager:
+    """Main IDS Manager - Orchestrates all components"""
+    
+    def __init__(self, config: Optional[IDSConfig] = None):
+        self.config = config or IDSConfig()
+        self.controller = DeploymentController(self.config)
+        self.running = False
+    
+    def start(self) -> bool:
+        """Start IDS system"""
+        if not self.controller.initialize():
+            print("❌ IDS initialization failed")
+            return False
+        
+        self.running = True
+        return True
+    
+    def deploy_test_batch(self, batch_num: int = 0, test_nmap: bool = False) -> bool:
+        """Deploy test batch for verification"""
+        if not self.running:
+            if not self.start():
+                return False
+        
+        print(f"\n🧪 Testing Batch {batch_num}...")
+        
+        if not self.controller.prepare_batch(batch_num):
+            return False
+        
+        if test_nmap:
+            test_cmd = self.controller.rule_manager.get_test_command(batch_num)
+            if test_cmd:
+                print(f"\n🔍 You can test with: {test_cmd}")
+        
+        return True
+    
+    def deploy_production(self) -> bool:
+        """Deploy all batches progressively (5 → 10 → 20 → all)"""
+        if not self.running:
+            if not self.start():
+                return False
+        
+        stages = [5, 10, 20, 50]  # Deploy in stages
+        
+        for stage in stages:
+            num_batches = stage // self.config.batch_size
+            if num_batches > 0:
+                print(f"\n📊 Stage: {stage} rules ({num_batches} batch(es))")
+                if not self.controller.deploy_batch_progressive(0, num_batches):
+                    break
+                
+                print(f"✓ Successfully loaded {stage} rules")
+                print("Press Enter to continue or Ctrl+C to stop...")
+                try:
+                    input()
+                except KeyboardInterrupt:
+                    print("\n⏹️ Deployment stopped")
+                    return False
+        
+        print("\n✅ Deployment complete!")
+        return True
+    
+    def export_code(self) -> bool:
+        """Export all generated code without deployment"""
+        if not self.running:
+            if not self.start():
+                return False
+        
+        return self.controller.export_all_code()
+    
+    def get_status(self) -> Dict:
+        """Get current status"""
+        return {
+            "config": {
+                "snort_rules": str(self.config.snort_json),
+                "output_dir": str(self.config.output_dir),
+                "batch_size": self.config.batch_size,
+            },
+            "deployment": self.controller.get_deployment_status(),
+            "alerts": self.controller.event_handler.get_stats(),
+        }
+    
+    def stop(self):
+        """Stop IDS system"""
+        self.running = False
+        print("✓ IDS stopped")
+
+
+# ============================================================================
+# UTILITY FUNCTIONS & MAIN
+# ============================================================================
+
+def print_help():
+    """Print usage instructions"""
+    help_text = """
+╔════════════════════════════════════════════════════════════════╗
+║     eBPF IDS Manager - OOP-Based Rule Deployment System       ║
+╚════════════════════════════════════════════════════════════════╝
+
+USAGE EXAMPLES:
+
+1. Test with single batch (verify deployment works):
+   manager = IDSManager()
+   manager.deploy_test_batch(batch_num=0, test_nmap=True)
+
+2. Export all generated code:
+   manager = IDSManager()
+   manager.export_code()
+
+3. Deploy progressively (5 → 10 → 20 rules):
+   manager = IDSManager()
+   manager.deploy_production()
+
+4. Check deployment status:
+   manager = IDSManager()
+   status = manager.get_status()
+   print(json.dumps(status, indent=2))
+
+KEY FEATURES:
+✓ OOP-based modular design
+✓ Progressive batch deployment (5-10-20+ rules)
+✓ Automatic nmap test command generation
+✓ $HOME_NET and $EXTERNAL_NET variable resolution
+✓ Separate functions for each protocol (TCP/UDP/ICMP)
+✓ Alert logging to file
+✓ Clean separation of concerns
+
+TESTING GUIDANCE:
+1. Start with batch 0 (5 rules)
+2. Generate nmap command: manager.deploy_test_batch(0, test_nmap=True)
+3. Run nmap against target ports
+4. Check ids_alerts.log for detections
+5. If successful, deploy next batch
+"""
+    print(help_text)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="eBPF IDS Manager")
+    parser.add_argument("--test-batch", type=int, default=0, 
+                       help="Test specific batch number")
+    parser.add_argument("--export", action="store_true",
+                       help="Export all code without deployment")
+    parser.add_argument("--help-usage", action="store_true",
+                       help="Show detailed usage examples")
+    parser.add_argument("--status", action="store_true",
+                       help="Show current status")
+    
+    args = parser.parse_args()
+    
+    if args.help_usage:
+        print_help()
+    else:
+        manager = IDSManager()
+        
+        if args.export:
+            print("📤 Exporting all generated code...")
+            if manager.export_code():
+                print("✅ Export successful")
+            else:
+                print("❌ Export failed")
+        
+        elif args.status:
+            manager.start()
+            status = manager.get_status()
+            print(json.dumps(status, indent=2))
+        
+        else:
+            print(f"🧪 Testing batch {args.test_batch}...")
+            if manager.deploy_test_batch(args.test_batch, test_nmap=True):
+                print("✅ Batch ready for testing")
+            else:
+                print("❌ Test failed")
