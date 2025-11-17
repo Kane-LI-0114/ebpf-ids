@@ -344,23 +344,33 @@ static __always_inline int {func_name}(struct __sk_buff *skb) {{
 '''
         return code
 
-    def _generate_port_check(self, port_spec: PortSpec) -> str:
-    
-     if isinstance(port_spec.value, tuple):
-         start, end = port_spec.value
-     elif isinstance(port_spec.value, int):
-         start = end = port_spec.value  # Single port
-     else:
-         return ""
-    
-     direction = port_spec.direction
-    
-     if direction == "src":
-         return f"    if (sport >= {start} && sport <= {end}) {{\n"
-     elif direction == "dst":
-         return f"    if (dport >= {start} && dport <= {end}) {{\n"
-     else:
-         return ""
+    def _generate_port_check(self, port_spec: PortSpec, port_var_name: str, direction_str: str) -> str:
+        """
+        Generates a C code snippet for checking a port condition.
+        It now correctly accepts the port specification, the C variable name for the port,
+        and a string indicating the direction for comments.
+        """
+        if not port_spec or port_spec.value is None:
+            return ""
+
+        condition = ""
+        port_type = port_spec.port_type
+        port_value = port_spec.value
+
+        if port_type == "single":
+            condition = f"{port_var_name} != {port_value}"
+        elif port_type == "range":
+            start, end = port_value
+            condition = f"({port_var_name} < {start} || {port_var_name} > {end})"
+        elif port_type == "list":
+            conditions = [f"{port_var_name} != {p}" for p in port_value]
+            condition = " && ".join(conditions)
+            if condition:
+                condition = f"({condition})"
+
+        if condition:
+            return f"    if ({condition}) return 0; /* Rule does not match {direction_str} port */\n"
+        return ""
 
 
 class UDPRuleEBPFGenerator(BaseEBPFGenerator):
