@@ -5,6 +5,7 @@
 eBPF IDS 用户空间管理程序
 """
 
+from settings import DebugConfig
 import os
 import sys
 import json
@@ -16,6 +17,7 @@ import array
 from bcc import BPF
 from datetime import datetime
 
+debug = DebugConfig()
 
 def get_active_interface():
     """自动检测活动的网络接口"""
@@ -227,20 +229,21 @@ class EventHandler:
         protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
         protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
         
-        # 调试输出：降低频率，每100个包打印一次，或者特殊端口立即打印
-        should_print = False
-        if event.protocol == 6:  # TCP
-            # HTTP, HTTPS 等重要端口立即打印（排除22端口避免SSH刷屏）
-            if event.dst_port in [80, 443, 8080, 21, 23, 3306, 5432]:
-                should_print = True
-            # SSH 端口每1000个打印一次
-            elif event.dst_port == 22 and self.tcp_count % 1000 == 1:
-                should_print = True
-        elif event.protocol == 1:  # ICMP
-            should_print = (self.icmp_count % 10 == 1)  # ICMP 每10个打印一次
-        
-        if should_print or self.event_count % 100 == 0:
-            print(f"[调试] 事件#{self.event_count} | {protocol_name} | {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} | Payload: {event.payload_len}B")
+        # 调试输出：根据配置决定是否打印
+        if debug.enabled:
+            should_print = False
+            if event.protocol == 6:  # TCP
+                # 重要端口立即打印（排除22端口避免SSH刷屏）
+                if event.dst_port in debug.important_ports:
+                    should_print = True
+                # SSH 端口按配置频率打印
+                elif event.dst_port == 22 and self.tcp_count % debug.ssh_interval == 1:
+                    should_print = True
+            elif event.protocol == 1:  # ICMP
+                should_print = (self.icmp_count % debug.icmp_interval == 1)
+            
+            if should_print or self.event_count % debug.print_interval == 0:
+                print(f"[调试] 事件#{self.event_count} | {protocol_name} | {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} | Payload: {event.payload_len}B")
         
         # 匹配规则
         matched_rules = self.rule_manager.match_rule(event)
@@ -248,12 +251,12 @@ class EventHandler:
         if matched_rules:
             # 有规则匹配，生成告警
             for rule in matched_rules:
-                # 去重检查（同一个源目标对，同一规则，10秒内只告警一次）
+                # 去重检查（同一个源目标对，同一规则，在配置的时间内只告警一次）
                 alert_key = (event.src_ip, event.dst_ip, rule['sid'])
                 current_time = time.time()
                 
                 if alert_key in self.last_alerts:
-                    if current_time - self.last_alerts[alert_key] < 10:
+                    if current_time - self.last_alerts[alert_key] < debug.alert_dedup_timeout:
                         continue  # 跳过重复告警
                 
                 self.last_alerts[alert_key] = current_time
@@ -396,9 +399,9 @@ class IDSManager:
             while True:
                 self.bpf.perf_buffer_poll(timeout=100)
                 
-                # 每 60 秒打印一次调试统计
+                # 根据配置定期打印调试统计
                 current_time = time.time()
-                if current_time - last_stats_time >= 60:
+                if debug.enabled and current_time - last_stats_time >= debug.stats_interval:
                     self._print_debug_stats()
                     last_stats_time = current_time
         except KeyboardInterrupt:
