@@ -348,93 +348,144 @@ class DeploymentController:
 # ============================================================================
 # MAIN IDS MANAGER
 # ============================================================================
+import os
+import time
+import subprocess
+from bcc import BPF
+from ebpf_oop_generator import DeploymentManager
 
 class IDSManager:
-    """Main IDS Manager - Orchestrates all components"""
-    
-    def __init__(self, config: Optional[IDSConfig] = None):
-        self.config = config or IDSConfig()
-        self.controller = DeploymentController(self.config)
-        self.running = False
-    
-    def start(self) -> bool:
-        """Start IDS system"""
-        if not self.controller.initialize():
-            print("❌ IDS initialization failed")
-            return False
-        
-        self.running = True
-        return True
-    
-    def deploy_test_batch(self, batch_num: int = 0, test_nmap: bool = False) -> bool:
-        """Deploy test batch for verification"""
-        if not self.running:
-            if not self.start():
-                return False
-        
-        print(f"\n🧪 Testing Batch {batch_num}...")
-        
-        if not self.controller.prepare_batch(batch_num):
-            return False
-        
-        if test_nmap:
-            test_cmd = self.controller.rule_manager.get_test_command(batch_num)
-            if test_cmd:
-                print(f"\n🔍 You can test with: {test_cmd}")
-        
-        return True
-    
-    def deploy_production(self) -> bool:
-        """Deploy all batches progressively (5 → 10 → 20 → all)"""
-        if not self.running:
-            if not self.start():
-                return False
-        
-        stages = [5, 10, 20, 50]  # Deploy in stages
-        
-        for stage in stages:
-            num_batches = stage // self.config.batch_size
-            if num_batches > 0:
-                print(f"\n📊 Stage: {stage} rules ({num_batches} batch(es))")
-                if not self.controller.deploy_batch_progressive(0, num_batches):
-                    break
-                
-                print(f"✓ Successfully loaded {stage} rules")
-                print("Press Enter to continue or Ctrl+C to stop...")
-                try:
-                    input()
-                except KeyboardInterrupt:
-                    print("\n⏹️ Deployment stopped")
-                    return False
-        
-        print("\n✅ Deployment complete!")
-        return True
-    
-    def export_code(self) -> bool:
-        """Export all generated code without deployment"""
-        if not self.running:
-            if not self.start():
-                return False
-        
-        return self.controller.export_all_code()
-    
-    def get_status(self) -> Dict:
-        """Get current status"""
-        return {
-            "config": {
-                "snort_rules": str(self.config.snort_json),
-                "output_dir": str(self.config.output_dir),
-                "batch_size": self.config.batch_size,
-            },
-            "deployment": self.controller.get_deployment_status(),
-            "alerts": self.controller.event_handler.get_stats(),
-        }
-    
-    def stop(self):
-        """Stop IDS system"""
-        self.running = False
-        print("✓ IDS stopped")
+    """
+    Manages the lifecycle of the eBPF-based IDS, including rule loading,
+    eBPF program compilation, kernel attachment, and event monitoring.
+    """
+    def __init__(self, json_path: str, interface: str, batch_size: int = 5):
+        """
+        Initializes the IDSManager.
+        Args:
+            json_path: Path to the JSON file containing Snort rules.
+            interface: The network interface to monitor (e.g., 'ens4').
+            batch_size: The number of rules to include in each eBPF batch.
+        """
+        self.json_path = json_path
+        self.interface = interface
+        self.batch_size = batch_size
+        self.deployment_manager = DeploymentManager(json_path, batch_size)
+        self.loaded_bpf_programs = []
 
+    def run(self):
+        """
+        Starts the IDS. Loads rules, attaches eBPF programs, and monitors for alerts.
+        """
+        print("================================================================================")
+        print("eBPF IDS - Kernel Loader (Real Machine)")
+        print("================================================================================")
+        
+        self._detect_interface()
+        
+        self.deployment_manager.load_and_batch_rules()
+        
+        # Load and attach all batches
+        for i in range(self.deployment_manager.batcher.get_batch_count()):
+            self.load_and_attach_batch(i)
+
+        print("\n✅ All eBPF programs attached. Monitoring for alerts...")
+        self._monitor_alerts()
+
+    def cleanup(self):
+        """
+        Detaches all loaded eBPF programs from the interface to clean up.
+        """
+        print("\n🧹 Cleaning up and detaching eBPF programs...")
+        for bpf in self.loaded_bpf_programs:
+            bpf.remove_xdp(self.interface, 0)
+        self.loaded_bpf_programs = []
+        print("✅ Cleanup complete.")
+
+    def _detect_interface(self):
+        """
+        Checks if the specified network interface exists.
+        """
+        try:
+            subprocess.check_output(['ip', 'link', 'show', self.interface])
+            print(f"✓ Detected interface: {self.interface}")
+        except subprocess.CalledProcessError:
+            print(f"✗ Error: Network interface '{self.interface}' not found.")
+            exit(1)
+
+    def load_and_attach_batch(self, batch_num: int):
+        """
+        Generates, loads, and attaches a specific batch of eBPF rules to the kernel.
+        """
+        self.deployment_manager.generate_batch_code(batch_num)
+        code_dict = self.deployment_manager.kernel_functions.get(batch_num, {})
+
+        # Process each protocol's generated code (e.g., tcp, udp)
+        for proto, generated_c_code in code_dict.items():
+            print(f"📦 Loading {proto.upper()} rules from batch {batch_num}...")
+            
+            try:
+                # 1. Initialize BPF with the generated C code
+                bpf = BPF(text=generated_c_code)
+                
+                # 2. Determine the function name from our generator convention
+                function_name = f"{proto}_rules_batch_{batch_num}"
+                
+                # 3. Load the specific function from the compiled BPF code
+                fn = bpf.load_func(function_name, BPF.XDP)
+                
+                # 4. Attach the function to the XDP hook of the network interface
+                bpf.attach_xdp(dev=self.interface, fn=fn, flags=0)
+                
+                self.loaded_bpf_programs.append(bpf)
+                print(f"✓ Successfully attached {proto.upper()} batch {batch_num} to '{self.interface}' via XDP")
+
+            except Exception as e:
+                print(f"✗ Failed to load {proto.upper()} rules: {e}")
+                # Optional: decide if you want to exit or continue if a batch fails
+                # exit(1) 
+
+    def _monitor_alerts(self):
+        """
+        Sets up the alert monitoring loop and prints alerts as they arrive.
+        """
+        def print_event(cpu, data, size):
+            """Callback function for handling alerts from the kernel."""
+            event = bpf["alerts"].event(data)
+            print(f"[ALERT] Rule SID: {event.rule_id} | Priority: {event.priority} | "
+                  f"SRC: {self._ip_to_str(event.src_ip)}:{event.src_port} -> "
+                  f"DST: {self._ip_to_str(event.dst_ip)}:{event.dst_port} | "
+                  f"MSG: {event.msg.decode('utf-8', 'ignore')}")
+
+        # Attach the callback to the 'alerts' perf buffer for each loaded BPF program
+        for bpf in self.loaded_bpf_programs:
+            bpf["alerts"].open_perf_buffer(print_event)
+
+        # Main loop to poll for alerts
+        try:
+            while True:
+                for bpf in self.loaded_bpf_programs:
+                    bpf.perf_buffer_poll()
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("\n🛑 IDS stopped by user.")
+            self.cleanup()
+            
+    def _ip_to_str(self, ip_int):
+        """Converts an integer IP address to its string representation."""
+        import socket
+        import struct
+        return socket.inet_ntoa(struct.pack("!I", ip_int))
+
+    if __name__ == '__main__':
+        # Configuration
+        INTERFACE = "ens4" 
+        JSON_RULES_PATH = "community_rules.json" 
+        BATCH_SIZE = 10
+
+        # Create and run the IDS
+        ids = IDSManager(json_path=JSON_RULES_PATH, interface=INTERFACE, batch_size=BATCH_SIZE)
+        ids.run()
 
 # ============================================================================
 # UTILITY FUNCTIONS & MAIN
