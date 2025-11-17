@@ -17,7 +17,7 @@ import signal
 
 # Import the OOP generator
 from ebpf_oop_generator import (
-    DeploymentManager, RuleBatcher, IPConfig, 
+    DeploymentManager, RuleBatcher, IPConfig,
     TCPRuleEBPFGenerator, UDPRuleEBPFGenerator,
     RulePatternFactory
 )
@@ -31,14 +31,27 @@ class IDSConfig:
     """Centralized IDS configuration"""
     
     def __init__(self):
-        # Project paths
+        # Project paths - FIXED
         self.current_dir = Path(__file__).resolve().parent
-        self.project_root = self.current_dir.parent.parent
+        
+        # FIX: Detect if we're in src/userspace or ebpf-ids root
+        if self.current_dir.name == "userspace":
+            # Running from: .../src/userspace/
+            self.project_root = self.current_dir.parent.parent
+            self.userspace_dir = self.current_dir
+        elif self.current_dir.name == "ebpf-ids" and (self.current_dir / "src").exists():
+            # Running from: .../ebpf-ids/
+            self.project_root = self.current_dir
+            self.userspace_dir = self.current_dir / "src" / "userspace"
+        else:
+            # Default fallback
+            self.project_root = self.current_dir.parent.parent
+            self.userspace_dir = self.current_dir.parent.parent / "src" / "userspace"
+        
         self.kernel_dir = self.project_root / "src" / "kernel"
-        self.userspace_dir = self.project_root / "src" / "userspace" / "ebpf-ids"
         self.snort_json = self.project_root / "snort_rules_ebpf.json"
         
-        # Output paths
+        # Output paths - Create in userspace directory
         self.output_dir = self.userspace_dir / "generated_ebpf"
         self.alerts_log = self.userspace_dir / "ids_alerts.log"
         
@@ -48,8 +61,9 @@ class IDSConfig:
         
         # IP configuration
         self.ip_config = IPConfig(
-    home_net="10.10.0.0/16",        # Your GCP VPC subnet
-    external_net="0.0.0.0/0"        )
+            home_net="10.10.0.0/16",      # Your GCP VPC subnet
+            external_net="0.0.0.0/0"
+        )
 
 
 # ============================================================================
@@ -64,14 +78,14 @@ class RuleManager:
         self.deployment_manager: Optional[DeploymentManager] = None
         self.rule_count = 0
         self.batch_count = 0
-        
+    
     def initialize(self) -> bool:
         """Initialize rule manager and load rules"""
         try:
             if not self.config.snort_json.exists():
                 print(f"❌ Snort rules JSON not found: {self.config.snort_json}")
                 return False
-                
+            
             print(f"📂 Loading rules from: {self.config.snort_json}")
             
             self.deployment_manager = DeploymentManager(
@@ -86,13 +100,15 @@ class RuleManager:
             return True
         except Exception as e:
             print(f"❌ Failed to initialize rule manager: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def generate_batch_code(self, batch_num: int) -> bool:
         """Generate eBPF code for specific batch"""
         if not self.deployment_manager:
             return False
-            
+        
         return self.deployment_manager.generate_batch_code(batch_num)
     
     def export_generated_code(self) -> bool:
@@ -101,18 +117,36 @@ class RuleManager:
             return False
         
         try:
+            # FIX: Ensure output directory exists
             self.config.output_dir.mkdir(parents=True, exist_ok=True)
+            print(f"✓ Created output directory: {self.config.output_dir}")
+            
+            success_count = 0
+            failed_count = 0
             
             for i in range(self.batch_count):
                 if self.generate_batch_code(i):
-                    self.deployment_manager.export_batch_code(
-                        i, 
-                        str(self.config.output_dir)
-                    )
+                    # FIX: Handle return value properly
+                    if self.deployment_manager.export_batch_code(i, str(self.config.output_dir)):
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                else:
+                    failed_count += 1
             
-            return True
+            print(f"\n✓ Export Summary: {success_count} batches exported, {failed_count} failed")
+            
+            if success_count > 0:
+                print(f"✓ Files exported to: {self.config.output_dir}")
+                print(f"✓ Verify with: ls -la {self.config.output_dir}")
+                return True
+            else:
+                return False
+                
         except Exception as e:
             print(f"❌ Export failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def get_batch_info(self, batch_num: int) -> Dict:
@@ -131,7 +165,7 @@ class RuleManager:
         """Print summary of all loaded rules and batches"""
         if not self.deployment_manager:
             return
-            
+        
         print("\n" + "=" * 80)
         print("RULE LOADING SUMMARY")
         print("=" * 80)
@@ -163,6 +197,9 @@ class EventHandler:
     def _init_log(self):
         """Initialize alert log file"""
         try:
+            # FIX: Ensure parent directory exists
+            Path(self.log_file).parent.mkdir(parents=True, exist_ok=True)
+            
             with open(self.log_file, 'a') as f:
                 f.write("\n" + "=" * 80 + "\n")
                 f.write(f"Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -240,7 +277,7 @@ class DeploymentController:
         self.rule_manager = RuleManager(config)
         self.event_handler = EventHandler(str(config.alerts_log))
         self.current_batch = 0
-        
+    
     def initialize(self) -> bool:
         """Initialize IDS system"""
         print("🚀 Initializing IDS System...")
@@ -452,7 +489,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="eBPF IDS Manager")
-    parser.add_argument("--test-batch", type=int, default=0, 
+    parser.add_argument("--test-batch", type=int, default=0,
                        help="Test specific batch number")
     parser.add_argument("--export", action="store_true",
                        help="Export all code without deployment")

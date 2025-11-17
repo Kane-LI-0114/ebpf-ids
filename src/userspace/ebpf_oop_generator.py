@@ -344,15 +344,23 @@ static __always_inline int {func_name}(struct __sk_buff *skb) {{
 '''
         return code
 
-    def _generate_port_check(self, port_spec: PortSpec, 
-                            var_name: str, direction: str) -> str:
-        """Generate port checking code"""
-        if port_spec.port_type == "single":
-            return f"        if ({var_name} != {port_spec.value}) continue;\n"
-        elif port_spec.port_type == "range":
-            start, end = port_spec.value
-            return f"        if ({var_name} < {start} || {var_name} > {end}) continue;\n"
-        return ""
+    def _generate_port_check(self, port_spec: PortSpec) -> str:
+    
+     if isinstance(port_spec.value, tuple):
+         start, end = port_spec.value
+     elif isinstance(port_spec.value, int):
+         start = end = port_spec.value  # Single port
+     else:
+         return ""
+    
+     direction = port_spec.direction
+    
+     if direction == "src":
+         return f"    if (sport >= {start} && sport <= {end}) {{\n"
+     elif direction == "dst":
+         return f"    if (dport >= {start} && dport <= {end}) {{\n"
+     else:
+         return ""
 
 
 class UDPRuleEBPFGenerator(BaseEBPFGenerator):
