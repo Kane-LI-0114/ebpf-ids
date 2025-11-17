@@ -303,11 +303,11 @@ static __always_inline int {func_name}(struct __sk_buff *skb) {{
 }}
 '''
         return C_HEADER_DEFINITIONS + func_logic
-
     def _generate_rule_checks(self) -> str:
         """Generate port and content checking logic"""
         checks = [self._generate_single_rule_check(rule) for rule in self.rules]
-        return "\\n".join(checks)
+        # Corrected line:
+        return "\n".join(checks)
 
     def _generate_single_rule_check(self, rule: RulePattern) -> str:
         """Generate check for single TCP rule"""
