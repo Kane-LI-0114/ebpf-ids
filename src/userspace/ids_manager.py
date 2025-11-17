@@ -5,7 +5,6 @@
 eBPF IDS 用户空间管理程序
 """
 
-from settings import DebugConfig
 import os
 import sys
 import json
@@ -16,6 +15,18 @@ import struct
 import array
 from bcc import BPF
 from datetime import datetime
+from dataclasses import dataclass, field
+
+@dataclass
+class DebugConfig:
+    """调试配置"""
+    enabled: bool = True                        # 是否启用调试模式
+    print_interval: int = 100                   # 每 N 个事件打印一次普通流量
+    stats_interval: int = 5                     # 每 N 秒打印一次统计信息
+    ssh_interval: int = 1000                    # SSH 流量每 N 个包打印一次
+    icmp_interval: int = 10                     # ICMP 流量每 N 个包打印一次
+    important_ports: list = field(default_factory=lambda: [80, 443, 8080, 21, 23, 3306, 5432])
+    alert_dedup_timeout: int = 10               # 告警去重时间（秒）
 
 debug = DebugConfig()
 
