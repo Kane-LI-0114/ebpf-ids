@@ -396,9 +396,9 @@ class IDSManager:
             while True:
                 self.bpf.perf_buffer_poll(timeout=100)
                 
-                # 每 5 秒打印一次调试统计
+                # 每 60 秒打印一次调试统计
                 current_time = time.time()
-                if current_time - last_stats_time >= 5:
+                if current_time - last_stats_time >= 60:
                     self._print_debug_stats()
                     last_stats_time = current_time
         except KeyboardInterrupt:
