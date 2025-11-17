@@ -74,14 +74,27 @@ class PortSpec:
     value: Union[int, Tuple[int, int], List[int], str, None] = None
 
     @classmethod
-    def from_rule(cls, port_obj) -> Optional['PortSpec']:
-        if port_obj is None:
+    def from_rule(cls, port_obj: dict) -> Optional['PortSpec']:
+        if not port_obj:
             return None
+
+        # Handle simple integer or string port notations (e.g., 80, "any")
+        if isinstance(port_obj, (int, str)):
+            return cls(port_type='single', value=port_obj)
+
         if isinstance(port_obj, dict):
-            return cls(
-                port_type=port_obj.get("type", "single"),
-                value=port_obj.get("port") or port_obj.get("start") or port_obj.get("ports")
-            )
+            port_type = port_obj.get('type', 'single')
+            value = None
+            if port_type == 'range':
+                if 'start' in port_obj and 'end' in port_obj:
+                    value = (port_obj['start'], port_obj['end'])
+            elif port_type == 'list':
+                value = port_obj.get('ports')
+            else:  # 'single' or default
+                value = port_obj.get('port')
+            
+            return cls(port_type=port_type, value=value)
+                
         return None
 
 
