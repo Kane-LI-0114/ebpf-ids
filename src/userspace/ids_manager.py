@@ -186,6 +186,9 @@ class EventHandler:
         self.event_count = 0
         self.alert_count = 0
         self.last_alerts = {}  # 用于去重：(src_ip, dst_ip, sid) -> timestamp
+        self.tcp_count = 0
+        self.udp_count = 0
+        self.icmp_count = 0
         
     def handle_event(self, cpu, data, size):
         """处理 eBPF 事件"""
@@ -208,6 +211,14 @@ class EventHandler:
         event = ct.cast(data, ct.POINTER(PacketEvent)).contents
         self.event_count += 1
         
+        # 统计协议
+        if event.protocol == 6:
+            self.tcp_count += 1
+        elif event.protocol == 17:
+            self.udp_count += 1
+        elif event.protocol == 1:
+            self.icmp_count += 1
+        
         # 格式化 IP 地址
         src_ip = self.format_ip(event.src_ip)
         dst_ip = self.format_ip(event.dst_ip)
@@ -215,6 +226,9 @@ class EventHandler:
         # 协议名称映射
         protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
         protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
+        
+        # 调试输出：打印所有捕获的包
+        print(f"[调试] 事件#{self.event_count} | {protocol_name} | {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} | Payload: {event.payload_len}B")
         
         # 匹配规则
         matched_rules = self.rule_manager.match_rule(event)
@@ -250,12 +264,7 @@ class EventHandler:
                     print(f"数据包载荷: {self._format_payload(bytes(event.payload[:min(32, event.payload_len)]))}")
                 
                 print(f"{'='*80}\n")
-        else:
-            # 普通流量日志（降低输出频率）
-            if self.event_count % 100 == 0:  # 每100个包输出一次
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{timestamp}] [事件 #{self.event_count}] {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} "
-                      f"| {protocol_name} | Payload: {event.payload_len} bytes")
+        # else 分支已被调试输出替代
     
     def format_ip(self, ip_int):
         """格式化 IP 地址"""
@@ -368,13 +377,47 @@ class IDSManager:
         self.bpf["events"].open_perf_buffer(self.event_handler.handle_event)
         
         # 事件轮询循环
+        import time
+        last_stats_time = time.time()
+        
         try:
             while True:
-                self.bpf.perf_buffer_poll()
+                self.bpf.perf_buffer_poll(timeout=100)
+                
+                # 每 5 秒打印一次调试统计
+                current_time = time.time()
+                if current_time - last_stats_time >= 5:
+                    self._print_debug_stats()
+                    last_stats_time = current_time
         except KeyboardInterrupt:
             print("\n" + "=" * 60)
             print(f"监控已停止，共捕获 {self.event_handler.event_count} 个事件")
             print("=" * 60)
+    
+    def _print_debug_stats(self):
+        """打印调试统计信息"""
+        try:
+            debug_map = self.bpf.get_table("debug_counters")
+            print("\n" + "="*60)
+            print("[调试统计]")
+            print(f"  eBPF 内核计数器:")
+            print(f"    总数据包: {debug_map[0].value}")
+            print(f"    IP 数据包: {debug_map[1].value}")
+            print(f"    TCP 数据包: {debug_map[2].value}")
+            print(f"    UDP 数据包: {debug_map[3].value}")
+            print(f"    ICMP 数据包: {debug_map[4].value}")
+            print(f"    匹配的数据包: {debug_map[5].value}")
+            print(f"    解析错误: {debug_map[6].value}")
+            print(f"    已提交事件: {debug_map[7].value}")
+            print(f"  用户空间计数器:")
+            print(f"    接收事件数: {self.event_handler.event_count}")
+            print(f"    TCP: {self.event_handler.tcp_count}")
+            print(f"    UDP: {self.event_handler.udp_count}")
+            print(f"    ICMP: {self.event_handler.icmp_count}")
+            print(f"    告警数: {self.event_handler.alert_count}")
+            print("="*60 + "\n")
+        except Exception as e:
+            print(f"[调试] 无法读取调试统计: {e}")
     
     def stop(self):
         """停止 IDS"""
