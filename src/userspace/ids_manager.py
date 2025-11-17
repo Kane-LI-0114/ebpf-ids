@@ -230,8 +230,11 @@ class EventHandler:
         # 调试输出：降低频率，每100个包打印一次，或者特殊端口立即打印
         should_print = False
         if event.protocol == 6:  # TCP
-            # SSH, HTTP, HTTPS 等重要端口立即打印
-            if event.dst_port in [22, 80, 443, 8080, 21, 23, 3306, 5432]:
+            # HTTP, HTTPS 等重要端口立即打印（排除22端口避免SSH刷屏）
+            if event.dst_port in [80, 443, 8080, 21, 23, 3306, 5432]:
+                should_print = True
+            # SSH 端口每1000个打印一次
+            elif event.dst_port == 22 and self.tcp_count % 1000 == 1:
                 should_print = True
         elif event.protocol == 1:  # ICMP
             should_print = (self.icmp_count % 10 == 1)  # ICMP 每10个打印一次
