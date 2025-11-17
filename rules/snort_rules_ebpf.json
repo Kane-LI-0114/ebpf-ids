@@ -1440,20 +1440,7 @@
     "priority": 3,
     "flow": "to_server"
   },
-  {
-    "action": "alert",
-    "protocol_num": 0,
-    "src_ip": "$EXTERNAL_NET",
-    "src_port": null,
-    "dst_ip": "$HOME_NET",
-    "dst_port": null,
-    "tcp_flags": {},
-    "msg": "OS-WINDOWS Microsoft WIndows IGMP dos attack",
-    "sid": 272,
-    "rev": 16,
-    "classtype": "attempted-dos",
-    "priority": 3
-  },
+  
   {
     "action": "alert",
     "protocol_num": 1,
