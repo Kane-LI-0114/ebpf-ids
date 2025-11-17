@@ -121,12 +121,13 @@ from datetime import datetime
 class KernelEBPFLoader:
     \"\"\"Load and manage eBPF programs in kernel\"\"\"
 
-    def __init__(self, generated_code_dir: str = "generated_ebpf", 
+    def __init__(self, generated_code_dir: str = "generated_ebpf",
                  interface: str = None, batch_num: int = 0):
         self.code_dir = Path(generated_code_dir)
         self.batch_num = batch_num
         self.interface = interface
         self.bpf_programs = {}
+        self.sockets = {}        # <--- add this
         self.running = False
 
     def auto_detect_interface(self) -> str:
@@ -171,19 +172,27 @@ class KernelEBPFLoader:
             bcc_code = self._wrap_bcc_code(code, 'tcp')
             
             # Load to kernel
+            from bcc import BPF  # already at top
+
             bpf = BPF(text=bcc_code)
             self.bpf_programs['tcp'] = bpf
-            
+
             # Attach to network interface
             if not self.interface:
                 self.interface = self.auto_detect_interface()
-            
             if not self.interface:
                 print("✗ No interface available")
                 return False
 
-            bpf.attach_socket_filter("ids_filter", self.interface)
+            # Load socket filter function and attach to interface
+            fn = bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
+            BPF.attach_raw_socket(fn, self.interface)
+
+            # Remember the socket FD so we can close it later
+            self.sockets['tcp'] = fn.sock
+
             print(f"✓ TCP rules loaded on {self.interface}")
+
             return True
 
         except Exception as e:
@@ -207,9 +216,13 @@ class KernelEBPFLoader:
             bcc_code = self._wrap_bcc_code(code, 'udp')
             bpf = BPF(text=bcc_code)
             self.bpf_programs['udp'] = bpf
-            
-            bpf.attach_socket_filter("ids_filter", self.interface)
+
+            fn = bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
+            BPF.attach_raw_socket(fn, self.interface)
+            self.sockets['udp'] = fn.sock
+
             print(f"✓ UDP rules loaded on {self.interface}")
+
             return True
 
         except Exception as e:
@@ -315,13 +328,15 @@ int ids_filter(struct __sk_buff *skb) {{
             self.running = False
 
     def unload_all(self):
-        \"\"\"Unload all eBPF programs\"\"\"
-        for name, bpf in self.bpf_programs.items():
+        # Close any raw sockets we attached
+        for name, sock_fd in self.sockets.items():
             try:
-                bpf.remove_socket_filter(self.interface)
-                print(f"✓ Unloaded {name} rules")
-            except:
-                pass
+                os.close(sock_fd)
+                print(f"✓ Closed {name} socket on {self.interface}")
+            except OSError as e:
+                print(f"⚠ Failed to close {name} socket: {e}")
+        self.sockets.clear()
+        # BPF objects will be cleaned up when the process exits
 
 
 if __name__ == "__main__":
