@@ -299,7 +299,12 @@ class TCPRuleEBPFGenerator(BaseEBPFGenerator):
         return True
 
     def generate_function(self) -> str:
-        """Generate eBPF function for TCP rules (socket filter style)"""
+        """
+        Generate eBPF function for TCP rules.
+
+        This function does not access packet data directly; it only receives
+        already-parsed 5‑tuple fields from the top-level ids_filter.
+        """
         if not self.rules:
             return ""
 
@@ -308,29 +313,13 @@ class TCPRuleEBPFGenerator(BaseEBPFGenerator):
 
         func_logic = f"""
 // eBPF Function: TCP Rules Batch {self.batch_id} | Rules: {len(self.rules)}
-static __always_inline int {func_name}(struct __sk_buff *skb) {{
-    u8 *cursor = 0;
-
-    // Parse Ethernet header
-    struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
-    if (!(ethernet->type == ETH_P_IP)) {{
-        return 0;
-    }}
-
-    // Parse IPv4 header
-    struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
-    if (ip->nextp != IPPROTO_TCP) {{
-        return 0;
-    }}
-
-    // Parse TCP header
-    struct tcp_t *tcp = cursor_advance(cursor, sizeof(*tcp));
-
-    u16 src_port = tcp->src_port;
-    u16 dst_port = tcp->dst_port;
-    u32 src_ip   = ip->src;
-    u32 dst_ip   = ip->dst;
-
+static __always_inline int {func_name}(
+    struct __sk_buff *skb,
+    u32 src_ip,
+    u32 dst_ip,
+    u16 src_port,
+    u16 dst_port
+) {{
 {rules_code}
     return 0;
 }}
@@ -398,41 +387,28 @@ class UDPRuleEBPFGenerator(BaseEBPFGenerator):
         return True
 
     def generate_function(self) -> str:
-        """Generate eBPF function for UDP rules (socket filter style)"""
+        """
+        Generate eBPF function for UDP rules.
+
+        Like the TCP generator, this does not access packet data directly.
+        """
         if not self.rules:
             return ""
 
         func_name = f"udp_rules_batch_{self.batch_id}"
-        # Placeholder for UDP rule checks; you can mirror TCP logic when you add UDP rules.
+        # You can later add UDP-specific conditions using src_port/dst_port/src_ip/dst_ip.
         rules_code = "// TODO: Add UDP rule checks here"
 
         func_logic = f"""
 // eBPF Function: UDP Rules Batch {self.batch_id} | Rules: {len(self.rules)}
-static __always_inline int {func_name}(struct __sk_buff *skb) {{
-    u8 *cursor = 0;
-
-    // Parse Ethernet header
-    struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
-    if (!(ethernet->type == ETH_P_IP)) {{
-        return 0;
-    }}
-
-    // Parse IPv4 header
-    struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
-    if (ip->nextp != IPPROTO_UDP) {{
-        return 0;
-    }}
-
-    // Parse UDP header
-    struct udp_t *udp = cursor_advance(cursor, sizeof(*udp));
-
-    u16 src_port = udp->src_port;
-    u16 dst_port = udp->dst_port;
-    u32 src_ip   = ip->src;
-    u32 dst_ip   = ip->dst;
-
+static __always_inline int {func_name}(
+    struct __sk_buff *skb,
+    u32 src_ip,
+    u32 dst_ip,
+    u16 src_port,
+    u16 dst_port
+) {{
     {rules_code}
-
     return 0;
 }}
 """

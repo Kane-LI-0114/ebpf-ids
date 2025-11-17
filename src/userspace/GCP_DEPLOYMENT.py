@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
+
 # -*- coding: utf-8 -*-
 
 """
 eBPF IDS - Google Cloud Deployment Guide
+
 Complete setup, deployment, and testing on GCP Debian Linux
 
 This guide covers:
+
 1. Prerequisites and kernel requirements
 2. Installation steps
 3. Loading eBPF code to kernel
@@ -25,6 +28,7 @@ class GCPDeploymentGuide:
     """Complete guide for GCP deployment"""
 
     SETUP_SCRIPT = """#!/bin/bash
+
 # Google Cloud Debian Linux - eBPF IDS Setup Script
 
 set -e
@@ -62,16 +66,16 @@ echo ""
 echo "[2] Installing BCC (Berkeley Packet Filter Compiler)..."
 
 sudo apt-get update
-sudo apt-get install -y \\
-    build-essential \\
-    libelf-dev \\
-    libllvm-dev \\
-    llvm-dev \\
-    clang \\
-    python3-pip \\
-    python3-dev \\
-    git \\
-    linux-headers-$(uname -r) \\
+sudo apt-get install -y \
+    build-essential \
+    libelf-dev \
+    libllvm-dev \
+    llvm-dev \
+    clang \
+    python3-pip \
+    python3-dev \
+    git \
+    linux-headers-$(uname -r) \
     bpftool
 
 # Install BCC from pip (easier on GCP)
@@ -83,7 +87,7 @@ echo "✓ Dependencies installed"
 echo ""
 echo "[3] Verifying BCC installation..."
 
-python3 -c "from bcc import BPF; print('✓ BCC library loaded successfully')" || \\
+python3 -c "from bcc import BPF; print('✓ BCC library loaded successfully')" || \
     echo "⚠ BCC verification may need manual setup"
 
 # Step 4: Check network interfaces
@@ -100,14 +104,16 @@ echo "Next: Run 'python3 ids_manager_new.py --status' to verify"
 """
 
     KERNEL_LOADER = """#!/usr/bin/env python3
+
 # -*- coding: utf-8 -*-
 
-\"\"\"
+\\\"\\\"\\\"
 eBPF IDS - Kernel Loader for Real Machines
+
 Loads compiled eBPF code to kernel and captures live alerts
 
 This is used AFTER exporting code and compiling with BCC
-\"\"\"
+\\\"\\\"\\\"
 
 import os
 import sys
@@ -119,7 +125,7 @@ from datetime import datetime
 
 
 class KernelEBPFLoader:
-    \"\"\"Load and manage eBPF programs in kernel\"\"\"
+    \\\"\\\"\\\"Load and manage eBPF programs in kernel\\\"\\\"\\\"
 
     def __init__(self, generated_code_dir: str = "generated_ebpf",
                  interface: str = None, batch_num: int = 0):
@@ -127,11 +133,11 @@ class KernelEBPFLoader:
         self.batch_num = batch_num
         self.interface = interface
         self.bpf_programs = {}
-        self.sockets = {}        # <--- add this
+        self.sockets = {}
         self.running = False
 
     def auto_detect_interface(self) -> str:
-        \"\"\"Auto-detect primary network interface\"\"\"
+        \\\"\\\"\\\"Auto-detect primary network interface\\\"\\\"\\\"
         try:
             # Get default route interface
             result = subprocess.run(
@@ -143,11 +149,11 @@ class KernelEBPFLoader:
             if_name = result.stdout.strip().split('\\n')[0]
             if if_name:
                 return if_name
-        except:
+        except Exception:
             pass
 
         # Fallback: check common interface names
-        for iface in ['ens4', 'eth0', 'ens3', 'wlan0']:  # ens4 checked first
+        for iface in ['ens4', 'eth0', 'ens3', 'wlan0']:
             if Path(f'/sys/class/net/{iface}').exists():
                 return iface
 
@@ -155,25 +161,21 @@ class KernelEBPFLoader:
         return None
 
     def load_tcp_rules(self, batch_num: int) -> bool:
-        \"\"\"Load TCP rules for batch\"\"\"
+        \\\"\\\"\\\"Load TCP rules for batch\\\"\\\"\\\"
         tcp_file = self.code_dir / f"batch_{batch_num}_tcp_rules.c"
-        
         if not tcp_file.exists():
             print(f"✗ TCP rules file not found: {tcp_file}")
             return False
 
         try:
             print(f"📦 Loading TCP rules from batch {batch_num}...")
-            
             with open(tcp_file, 'r') as f:
                 code = f.read()
 
             # Add BCC-specific template
             bcc_code = self._wrap_bcc_code(code, 'tcp')
-            
-            # Load to kernel
-            from bcc import BPF  # already at top
 
+            # Load to kernel
             bpf = BPF(text=bcc_code)
             self.bpf_programs['tcp'] = bpf
 
@@ -192,7 +194,6 @@ class KernelEBPFLoader:
             self.sockets['tcp'] = fn.sock
 
             print(f"✓ TCP rules loaded on {self.interface}")
-
             return True
 
         except Exception as e:
@@ -200,29 +201,33 @@ class KernelEBPFLoader:
             return False
 
     def load_udp_rules(self, batch_num: int) -> bool:
-        \"\"\"Load UDP rules for batch\"\"\"
+        \\\"\\\"\\\"Load UDP rules for batch\\\"\\\"\\\"
         udp_file = self.code_dir / f"batch_{batch_num}_udp_rules.c"
-        
         if not udp_file.exists():
             print(f"⚠ UDP rules file not found: {udp_file}")
             return True  # Not critical
 
         try:
             print(f"📦 Loading UDP rules from batch {batch_num}...")
-            
             with open(udp_file, 'r') as f:
                 code = f.read()
 
             bcc_code = self._wrap_bcc_code(code, 'udp')
+
             bpf = BPF(text=bcc_code)
             self.bpf_programs['udp'] = bpf
+
+            if not self.interface:
+                self.interface = self.auto_detect_interface()
+            if not self.interface:
+                print("✗ No interface available")
+                return False
 
             fn = bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
             BPF.attach_raw_socket(fn, self.interface)
             self.sockets['udp'] = fn.sock
 
             print(f"✓ UDP rules loaded on {self.interface}")
-
             return True
 
         except Exception as e:
@@ -230,10 +235,15 @@ class KernelEBPFLoader:
             return False
 
     def _wrap_bcc_code(self, code: str, proto: str) -> str:
-        \"\"\"Wrap generated code with BCC template\"\"\"
-        return f'''
+        \\\"\\\"\\\"Wrap generated code with BCC template\\\"\\\"\\\"
+        if proto == 'tcp':
+            return f'''
 #include <uapi/linux/ptrace.h>
 #include <net/sock.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
 #include <bcc/proto.h>
 
 // ====== Generated Code ======
@@ -241,26 +251,100 @@ class KernelEBPFLoader:
 
 // ====== Entry Point ======
 int ids_filter(struct __sk_buff *skb) {{
-    // Call protocol-specific handler
-    if (tcp_rules_batch_{self.batch_num})
-        return tcp_rules_batch_{self.batch_num}(skb);
-    
+    u8 *cursor = 0;
+
+    // Parse Ethernet header
+    struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
+    if (!(ethernet->type == ETH_P_IP)) {{
+        return 0;
+    }}
+
+    // Parse IPv4 header
+    struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
+    if (ip->nextp != IPPROTO_TCP) {{
+        return 0;
+    }}
+
+    // Parse TCP header
+    struct tcp_t *tcp = cursor_advance(cursor, sizeof(*tcp));
+
+    u16 src_port = tcp->src_port;
+    u16 dst_port = tcp->dst_port;
+    u32 src_ip   = ip->src;
+    u32 dst_ip   = ip->dst;
+
+    // Call batch function with parsed fields
+    return tcp_rules_batch_{self.batch_num}(skb, src_ip, dst_ip, src_port, dst_port);
+}}
+'''
+        elif proto == 'udp':
+            return f'''
+#include <uapi/linux/ptrace.h>
+#include <net/sock.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/udp.h>
+#include <bcc/proto.h>
+
+// ====== Generated Code ======
+{code}
+
+// ====== Entry Point ======
+int ids_filter(struct __sk_buff *skb) {{
+    u8 *cursor = 0;
+
+    // Parse Ethernet header
+    struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
+    if (!(ethernet->type == ETH_P_IP)) {{
+        return 0;
+    }}
+
+    // Parse IPv4 header
+    struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
+    if (ip->nextp != IPPROTO_UDP) {{
+        return 0;
+    }}
+
+    // Parse UDP header
+    struct udp_t *udp = cursor_advance(cursor, sizeof(*udp));
+
+    u16 src_port = udp->src_port;
+    u16 dst_port = udp->dst_port;
+    u32 src_ip   = ip->src;
+    u32 dst_ip   = ip->dst;
+
+    // Call batch function with parsed fields
+    return udp_rules_batch_{self.batch_num}(skb, src_ip, dst_ip, src_port, dst_port);
+}}
+'''
+        else:
+            # Fallback: include code and a no-op filter
+            return f'''
+#include <uapi/linux/ptrace.h>
+#include <net/sock.h>
+#include <bcc/proto.h>
+
+// ====== Generated Code ======
+{code}
+
+int ids_filter(struct __sk_buff *skb) {{
     return 0;
 }}
-        '''
+'''
 
     def setup_perf_output(self):
-        \"\"\"Setup perf buffer for alerts\"\"\"
+        \\\"\\\"\\\"Setup perf buffer for alerts\\\"\\\"\\\"
         for name, bpf in self.bpf_programs.items():
             try:
                 alert_output = bpf["alerts"]
                 alert_output.open_perf_buffer(self.handle_alert)
                 print(f"✓ Perf buffer setup for {name}")
-            except:
+            except Exception:
                 pass
 
     def handle_alert(self, cpu, data, size):
-        \"\"\"Handle incoming alert from kernel\"\"\"
+        \\\"\\\"\\\"Handle incoming alert from kernel\\\"\\\"\\\"
+
         class AlertEvent(ctypes.Structure):
             _fields_ = [
                 ("rule_id", ctypes.c_uint32),
@@ -273,35 +357,30 @@ int ids_filter(struct __sk_buff *skb) {{
             ]
 
         alert = ctypes.cast(data, ctypes.POINTER(AlertEvent)).contents
-        
         src_ip = self._format_ip(alert.src_ip)
         dst_ip = self._format_ip(alert.dst_ip)
         msg = alert.msg.decode('utf-8', errors='ignore').rstrip('\\x00')
-
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
         alert_line = (
             f"[{timestamp}] 🚨 ALERT TRIGGERED\\n"
-            f"  Rule ID: {alert.rule_id}\\n"
-            f"  Priority: {alert.priority}\\n"
-            f"  Message: {msg}\\n"
-            f"  Source: {src_ip}:{alert.src_port}\\n"
-            f"  Destination: {dst_ip}:{alert.dst_port}\\n"
+            f" Rule ID: {alert.rule_id}\\n"
+            f" Priority: {alert.priority}\\n"
+            f" Message: {msg}\\n"
+            f" Source: {src_ip}:{alert.src_port}\\n"
+            f" Destination: {dst_ip}:{alert.dst_port}\\n"
         )
-        
+
         print(alert_line)
-        
-        # Log to file
         self._log_alert(alert_line)
 
     @staticmethod
     def _format_ip(ip_int: int) -> str:
-        \"\"\"Convert integer IP to dotted notation\"\"\"
-        return ".".join([
-            str((ip_int >> (i * 8)) & 0xFF) for i in range(4)
-        ])
+        \\\"\\\"\\\"Convert integer IP to dotted notation\\\"\\\"\\\"
+        return ".".join([str((ip_int >> (i * 8)) & 0xFF) for i in range(4)])
 
     def _log_alert(self, alert_line: str):
-        \"\"\"Write alert to log file\"\"\"
+        \\\"\\\"\\\"Write alert to log file\\\"\\\"\\\"
         try:
             with open("ids_alerts.log", 'a') as f:
                 f.write(alert_line + "\\n")
@@ -309,7 +388,7 @@ int ids_filter(struct __sk_buff *skb) {{
             print(f"⚠ Failed to log alert: {e}")
 
     def start_monitoring(self):
-        \"\"\"Start live monitoring for alerts\"\"\"
+        \\\"\\\"\\\"Start live monitoring for alerts\\\"\\\"\\\"
         self.running = True
         print("\\n" + "=" * 80)
         print("🔍 LIVE MONITORING - Press Ctrl+C to stop")
@@ -321,14 +400,14 @@ int ids_filter(struct __sk_buff *skb) {{
                 for bpf in self.bpf_programs.values():
                     try:
                         bpf.perf_buffer_poll(1)
-                    except:
+                    except Exception:
                         pass
         except KeyboardInterrupt:
             print("\\n✓ Monitoring stopped")
             self.running = False
 
     def unload_all(self):
-        # Close any raw sockets we attached
+        \\\"\\\"\\\"Unload all eBPF programs and close sockets\\\"\\\"\\\"
         for name, sock_fd in self.sockets.items():
             try:
                 os.close(sock_fd)
@@ -341,7 +420,7 @@ int ids_filter(struct __sk_buff *skb) {{
 
 if __name__ == "__main__":
     loader = KernelEBPFLoader()
-    
+
     print("\\n" + "=" * 80)
     print("eBPF IDS - Kernel Loader (Real Machine)")
     print("=" * 80)
@@ -349,11 +428,12 @@ if __name__ == "__main__":
     # Auto-detect interface
     if not loader.interface:
         loader.interface = loader.auto_detect_interface()
-        if loader.interface:
-            print(f"✓ Detected interface: {loader.interface}")
-        else:
-            print("✗ Could not detect interface")
-            sys.exit(1)
+
+    if loader.interface:
+        print(f"✓ Detected interface: {loader.interface}")
+    else:
+        print("✗ Could not detect interface")
+        sys.exit(1)
 
     # Load batch 0
     if not loader.load_tcp_rules(0):
@@ -393,11 +473,11 @@ def main():
 
     parser = argparse.ArgumentParser(description="GCP eBPF IDS Deployment Guide")
     parser.add_argument("--generate-setup", action="store_true",
-                       help="Generate GCP setup script")
+                        help="Generate GCP setup script")
     parser.add_argument("--generate-loader", action="store_true",
-                       help="Generate kernel loader")
+                        help="Generate kernel loader")
     parser.add_argument("--all", action="store_true",
-                       help="Generate all scripts")
+                        help="Generate all scripts")
 
     args = parser.parse_args()
 
@@ -408,12 +488,12 @@ def main():
         GCPDeploymentGuide.create_kernel_loader()
 
     if args.all:
-        print("\n✓ All scripts generated!")
+        print("\\n✓ All scripts generated!")
         print("Next steps:")
-        print("  1. chmod +x gcp_setup.sh")
-        print("  2. ./gcp_setup.sh")
-        print("  3. python3 ids_manager_new.py --export")
-        print("  4. python3 kernel_loader.py")
+        print(" 1. chmod +x gcp_setup.sh")
+        print(" 2. ./gcp_setup.sh")
+        print(" 3. python3 ids_manager_new.py --export")
+        print(" 4. python3 kernel_loader.py")
 
 
 if __name__ == "__main__":
