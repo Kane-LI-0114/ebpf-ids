@@ -1,468 +1,455 @@
 #!/usr/bin/env python3
+
 # -*- coding: utf-8 -*-
-"""
-
-Refactored IDS Manager - Clean OOP Architecture
-Uses ebpf_oop_generator for progressive rule deployment
-Replaces all broken eBPF code with new OOP-based generator
 
 """
+eBPF IDS 用户空间管理程序 - Enhanced with Modular Batch Loading
+"""
+
 import os
-import json
-import sys
 from pathlib import Path
-from typing import Optional, Dict, List
-from datetime import datetime
+import sys
+import json
 import signal
-import time
+import socket
+import fcntl
+import struct
+import array
+from datetime import datetime
 import subprocess
-from bcc import BPF
-from ebpf_oop_generator import DeploymentManager
+import time
+from typing import Optional, Union, List
 
-# Import the OOP generator
-from ebpf_oop_generator import (
-    DeploymentManager, RuleBatcher, IPConfig,
-    TCPRuleEBPFGenerator, UDPRuleEBPFGenerator,
-    RulePatternFactory
-)
+# Add the parent directory to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+try:
+    from utils import SnortRuleParser
+except ImportError:
+    SnortRuleParser = None
 
-class IDSConfig:
-    """Centralized IDS configuration"""
-    def __init__(self):
-        # Project paths - FIXED
-        self.current_dir = Path(__file__).resolve().parent
+def get_active_interface():
+    """自动检测活动的网络接口"""
+    try:
+        with open('/proc/net/dev', 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            interfaces = []
+            for line in lines[2:]:
+                if ':' in line:
+                    iface_name = line.split(':')[0].strip()
+                    if iface_name != 'lo':
+                        interfaces.append(iface_name)
+            if interfaces:
+                return interfaces[0]
+        return 'eth0'
+    except Exception as e:
+        print(f"警告: 无法自动检测网络接口: {e}")
+        return 'eth0'
 
-        # FIX: Detect if we're in src/userspace or ebpf-ids root
-        if self.current_dir.name == "userspace":
-            # Running from: .../src/userspace/
-            self.project_root = self.current_dir.parent.parent
-            self.userspace_dir = self.current_dir
-        elif self.current_dir.name == "ebpf-ids" and (self.current_dir / "src").exists():
-            # Running from: .../ebpf-ids/
-            self.project_root = self.current_dir
-            self.userspace_dir = self.current_dir / "src" / "userspace"
-        else:
-            # Default fallback
-            self.project_root = self.current_dir.parent.parent
-            self.userspace_dir = self.current_dir.parent.parent / "src" / "userspace"
-
-        self.kernel_dir = self.project_root / "src" / "kernel"
-        self.snort_json = self.project_root / "snort_rules_ebpf.json"
-
-        # Output paths - Create in userspace directory
-        self.output_dir = self.userspace_dir / "generated_ebpf"
-        self.alerts_log = self.userspace_dir / "ids_alerts.log"
-
-        # eBPF configuration
-        self.batch_size = 5 # Start with 5 rules per batch
-        self.max_rules_per_function = 10
-
-        # IP configuration
-        self.ip_config = IPConfig(
-            home_net="10.10.0.0/16", # Your GCP VPC subnet
-            external_net="0.0.0.0/0"
-        )
-
-# ============================================================================
-# RULE MANAGER (OOP)
-# ============================================================================
+from pathlib import Path
+from typing import Optional, Union
 
 class RuleManager:
-    """Manages rule loading, analysis, and eBPF code generation"""
-    def __init__(self, config: IDSConfig):
-        self.config = config
-        self.deployment_manager: Optional[DeploymentManager] = None
-        self.rule_count = 0
-        self.batch_count = 0
+    """规则管理器"""
+    def __init__(self, rules_dir: str):
+        self.rules_dir = Path(rules_dir)
+        self.rules = []
+        self.ebpf_configs = []
+        if SnortRuleParser:
+            self.parser = SnortRuleParser()
+        else:
+            self.parser = None
 
-    def initialize(self) -> bool:
-        """Initialize rule manager and load rules"""
-        try:
-            if not self.config.snort_json.exists():
-                print(f"❌ Snort rules JSON not found: {self.config.snort_json}")
-                return False
+    def load_rules(
+        self,
+        rule_file: Optional[Union[str, Path]] = None,
+    ):
+        """从规则目录加载规则（支持动态路径）"""
+        if rule_file is None:
+            project_root = Path(__file__).resolve().parents[2]
+            file_path = project_root / "snort3-community.rules"
+        else:
+            file_path = Path(rule_file).expanduser().resolve()
 
-            print(f"📂 Loading rules from: {self.config.snort_json}")
-            self.deployment_manager = DeploymentManager(
-                str(self.config.snort_json),
-                batch_size=self.config.batch_size,
-                ip_config=self.config.ip_config
-            )
-
-            self.rule_count = self.deployment_manager.load_and_batch_rules()
-            self.batch_count = self.deployment_manager.batcher.get_batch_count()
-            return True
-        except Exception as e:
-            print(f"❌ Failed to initialize rule manager: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def generate_batch_code(self, batch_num: int) -> bool:
-        """Generate eBPF code for specific batch"""
-        if not self.deployment_manager:
-            return False
-        return self.deployment_manager.generate_batch_code(batch_num)
-
-    def export_generated_code(self) -> bool:
-        """Export all generated code to output directory"""
-        if not self.deployment_manager:
-            return False
-        try:
-            # FIX: Ensure output directory exists
-            self.config.output_dir.mkdir(parents=True, exist_ok=True)
-            print(f"✓ Created output directory: {self.config.output_dir}")
-
-            success_count = 0
-            failed_count = 0
-
-            for i in range(self.batch_count):
-                if self.generate_batch_code(i):
-                    # FIX: Handle return value properly
-                    if self.deployment_manager.export_batch_code(i, str(self.config.output_dir)):
-                        success_count += 1
-                    else:
-                        failed_count += 1
-                else:
-                    failed_count += 1
-            
-            print(f"\\n✓ Export Summary: {success_count} batches exported, {failed_count} failed")
-            if success_count > 0:
-                print(f"✓ Files exported to: {self.config.output_dir}")
-                print(f"✓ Verify with: ls -la {self.config.output_dir}")
-                return True
-            else:
-                return False
-
-        except Exception as e:
-            print(f"❌ Export failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def get_batch_info(self, batch_num: int) -> Dict:
-        """Get information about specific batch"""
-        if not self.deployment_manager:
-            return {}
-        return self.deployment_manager.get_batch_info(batch_num)
-
-    def get_test_command(self, batch_num: int) -> str:
-        """Get nmap test command for batch"""
-        if not self.deployment_manager:
-            return ""
-        return self.deployment_manager.generate_test_command(batch_num)
-
-    def print_summary(self):
-        """Print summary of all loaded rules and batches"""
-        if not self.deployment_manager:
+        if not self.parser:
+            print("警告: SnortRuleParser 不可用")
             return
 
-        print("\\n" + "=" * 80)
-        print("RULE LOADING SUMMARY")
-        print("=" * 80)
-        print(f"Total Rules Loaded: {self.rule_count}")
-        print(f"Batch Size: {self.config.batch_size}")
-        print(f"Total Batches: {self.batch_count}")
-        print()
+        try:
+            parsed_rules = self.parser.parse_file(str(file_path))
+            for rule in parsed_rules:
+                if self.validate_rule(rule):
+                    self.rules.append(rule)
+                    ebpf_config = self.parser.to_ebpf_config(rule)
+                    self.ebpf_configs.append(ebpf_config)
+        except Exception as e:
+            print(f"加载失败: {e} (规则文件: {file_path})")
 
-        for i in range(min(self.batch_count, 10)): # Show first 10 batches
-            info = self.get_batch_info(i)
-            if info:
-                print(f"Batch {i}: {info['total_rules']} rules \\n"
-                      f"(TCP: {info['tcp_rules']}, UDP: {info['udp_rules']}, ICMP: {info['icmp_rules']})")
+    def parse_rule(self, rule_line):
+        """解析单条规则"""
+        if isinstance(rule_line, str) and self.parser:
+            ir = self.parser.parse_rule(rule_line)
+            if ir and self.validate_rule(ir):
+                self.rules.append(ir)
+                ebpf_config = self.parser.to_ebpf_config(ir)
+                self.ebpf_configs.append(ebpf_config)
+                return ir
+        return None
 
-# ============================================================================
-# EVENT HANDLER (OOP)
-# ============================================================================
+    def validate_rule(self, rule):
+        """验证规则"""
+        required_fields = ['action', 'protocol', 'src_ip', 'src_port',
+                         'direction', 'dst_ip', 'dst_port']
+        return all(field in rule for field in required_fields)
+
+    def get_rules(self):
+        """获取所有规则"""
+        return self.rules
 
 class EventHandler:
-    """Handles eBPF perf buffer events"""
-    def __init__(self, log_file: str):
-        self.log_file = log_file
+    """事件处理器"""
+    def __init__(self, rule_manager):
+        self.rule_manager = rule_manager
         self.event_count = 0
-        self.alert_count = 0
-        self._init_log()
 
-    def _init_log(self):
-        """Initialize alert log file"""
-        try:
-            # FIX: Ensure parent directory exists
-            Path(self.log_file).parent.mkdir(parents=True, exist_ok=True)
-            with open(self.log_file, 'a') as f:
-                f.write("\\n" + "=" * 80 + "\\n")
-                f.write(f"Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\\n")
-                f.write("=" * 80 + "\\n\\n")
-        except Exception as e:
-            print(f"⚠️ Failed to initialize log file: {e}")
-
-    def handle_alert(self, cpu, data, size):
-        """Handle eBPF alert event"""
+    def handle_event(self, cpu, data, size):
+        """处理 eBPF 事件"""
         import ctypes as ct
 
-        class AlertEvent(ct.Structure):
+        class PacketEvent(ct.Structure):
             _fields_ = [
-                ("rule_id", ct.c_uint32),
-                ("priority", ct.c_uint32),
                 ("src_ip", ct.c_uint32),
                 ("dst_ip", ct.c_uint32),
                 ("src_port", ct.c_uint16),
                 ("dst_port", ct.c_uint16),
-                ("msg", ct.c_char * 256),
+                ("protocol", ct.c_uint8),
+                ("payload_len", ct.c_uint32),
+                ("payload", ct.c_uint8 * 256)
             ]
 
+        event = ct.cast(data, ct.POINTER(PacketEvent)).contents
+        self.event_count += 1
+
+        src_ip = self.format_ip(event.src_ip)
+        dst_ip = self.format_ip(event.dst_ip)
+
+        protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
+        protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] [事件 #{self.event_count}] {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} "
+              f"| {protocol_name} | Payload: {event.payload_len} bytes")
+
+    def format_ip(self, ip_int):
+        """格式化 IP 地址"""
+        return ".".join(map(str, [
+            ip_int & 0xFF,
+            (ip_int >> 8) & 0xFF,
+            (ip_int >> 16) & 0xFF,
+            (ip_int >> 24) & 0xFF
+        ]))
+
+    def process_packet(self, event):
+        """处理数据包事件"""
+        pass
+
+    def log_alert(self, alert_info):
+        """记录告警信息"""
+        pass
+
+class ModularBatchLoader:
+    """模块化批处理加载器 - 用于加载隔离的eBPF规则程序"""
+
+    def __init__(self, interface: str = "ens4"):
+        self.interface = interface
+        self.loaded_programs = []
+        self.rule_names = []
+
+    def load_modular_batch(self, batch_id: int = 0, num_rules: int = 5, 
+                          c_file: Optional[str] = None) -> bool:
+        """加载模块化规则批次"""
         try:
-            alert = ct.cast(data, ct.POINTER(AlertEvent)).contents
-            self.alert_count += 1
-            src_ip = self._format_ip(alert.src_ip)
-            dst_ip = self._format_ip(alert.dst_ip)
-            msg = alert.msg.decode('utf-8', errors='ignore').rstrip('\\x00')
+            # 确定C文件路径
+            if c_file is None:
+                c_file = f"rule_batch_{batch_id}.c"
 
-            alert_line = (
-                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                f"Alert #{self.alert_count}: Rule {alert.rule_id} (Priority {alert.priority})\\n"
-                f"  {msg}\\n"
-                f"  {src_ip}:{alert.src_port} → {dst_ip}:{alert.dst_port}\\n"
-            )
-
-            print(alert_line)
-            self._log_alert(alert_line)
-        except Exception as e:
-            print(f"❌ Error handling alert: {e}")
-
-    @staticmethod
-    def _format_ip(ip_int: int) -> str:
-        """Format IP from integer"""
-        return ".".join([
-            str((ip_int >> (i * 8)) & 0xFF) for i in range(4)
-        ])
-
-    def _log_alert(self, alert_line: str):
-        """Write alert to log file"""
-        try:
-            with open(self.log_file, 'a') as f:
-                f.write(alert_line + "\\n")
-        except Exception as e:
-            print(f"⚠️ Failed to write alert log: {e}")
-
-    def get_stats(self) -> Dict:
-        """Get alert statistics"""
-        return {
-            "total_events": self.event_count,
-            "total_alerts": self.alert_count,
-        }
-
-# ============================================================================
-# DEPLOYMENT CONTROLLER (OOP)
-# ============================================================================
-
-class DeploymentController:
-    """Controls the deployment and lifecycle of eBPF programs"""
-
-    def __init__(self, config: IDSConfig, rule_manager: RuleManager, event_handler: EventHandler):
-        self.config = config
-        self.rule_manager = rule_manager
-        self.event_handler = event_handler
-        self.bpf_instances: Dict[str, BPF] = {}
-        self.running = True
-        signal.signal(signal.SIGINT, self._handle_exit)
-        signal.signal(signal.SIGTERM, self._handle_exit)
-
-    def _handle_exit(self, signum, frame):
-        """Handle graceful shutdown"""
-        print("\\n gracefully shutting down...")
-        self.running = False
-        # Detach BPF programs?
-        # In this model, exit is sufficient
-        sys.exit(0)
-
-    def deploy_and_monitor(self):
-        """Main deployment and monitoring loop"""
-        if not self.rule_manager.deployment_manager:
-            return
-
-        # Get the primary interface
-        interface = self._get_primary_interface()
-        if not interface:
-            print("❌ Could not determine primary network interface.")
-            return
-
-        print(f"✓ Using network interface: {interface}")
-
-        # Iterate through batches and deploy
-        for i in range(self.rule_manager.batch_count):
-            if not self.running:
-                break
-
-            batch_info = self.rule_manager.get_batch_info(i)
-            print("\\n" + "=" * 80)
-            print(f"🚀 DEPLOYING BATCH {i}/{self.rule_manager.batch_count - 1}")
-            print("=" * 80)
-
-            # Load and attach TCP rules
-            if batch_info.get('tcp_rules', 0) > 0:
-                if not self._load_and_attach_bpf(i, 'tcp', interface):
-                    continue # Skip to next batch on failure
-
-            # Load and attach UDP rules
-            if batch_info.get('udp_rules', 0) > 0:
-                if not self._load_and_attach_bpf(i, 'udp', interface):
-                    continue
-
-            # Add ICMP later if needed
-
-            print(f"✓ Batch {i} loaded. Monitoring for alerts...")
-            print("💡 Press Ctrl+C to stop.")
-
-            # Test command
-            test_cmd = self.rule_manager.get_test_command(i)
-            if test_cmd:
-                print(f"🧪 To test, run: sudo {test_cmd}")
-
-            # Monitor for a bit before the next batch
-            self._poll_for_alerts(5)
-
-        if self.running:
-            print("\\n" + "=" * 80)
-            print("✅ All batches deployed. Continuous monitoring active.")
-            print("=" * 80)
-            while self.running:
-                self._poll_for_alerts(1)
-
-    def _load_and_attach_bpf(self, batch_num: int, proto: str, interface: str) -> bool:
-        """Loads, compiles, and attaches a BPF program"""
-        bpf_file = self.config.output_dir / f"bpf_{proto}_batch_{batch_num}.c"
-        if not bpf_file.exists():
-            print(f"⚠️ BPF file not found for batch {batch_num} ({proto}): {bpf_file}")
-            return False
-
-        print(f"📄 Loading eBPF code from: {bpf_file}")
-        with open(bpf_file, 'r') as f:
-            bpf_text = f.read()
-
-        try:
-            # Compile the BPF program
-            bpf = BPF(text=bpf_text)
-            self.bpf_instances[f"{proto}_{batch_num}"] = bpf
-
-            # Attach the filter
-            if not self._attach_raw_socket_filter(bpf, interface):
+            c_file_path = Path(c_file)
+            if not c_file_path.exists():
+                print(f"✗ C文件不存在: {c_file}")
                 return False
 
-            # Open perf buffer for alerts
-            bpf["alerts"].open_perf_buffer(self.event_handler.handle_alert)
-            print(f"✓ Successfully loaded and attached {proto.upper()} rules for batch {batch_num}")
+            print(f"\n正在加载模块化批次 {batch_id}...")
+            print(f"接口: {self.interface}")
+            print(f"规则数: {num_rules}")
+
+            # 编译C文件为object文件
+            o_file = str(c_file_path.with_suffix('.o'))
+            if not self._compile_ebpf(c_file, o_file):
+                print(f"✗ 编译失败: {c_file}")
+                return False
+
+            # 加载eBPF程序
+            if not self._load_ebpf_program(o_file):
+                print(f"✗ 加载eBPF程序失败: {o_file}")
+                return False
+
+            # 附加到网络接口
+            if not self._attach_to_interface():
+                print(f"✗ 附加到接口失败: {self.interface}")
+                return False
+
+            print(f"✓ 批次 {batch_id} 加载成功")
             return True
 
         except Exception as e:
-            print(f"❌ Failed to load {proto.upper()} rules for batch {batch_num}: {e}")
-            # Consider adding more detailed error logging, e.g., from the BPF compiler
+            print(f"✗ 加载批次时出错: {e}")
             return False
 
-    def _attach_raw_socket_filter(self, bpf: BPF, interface: str) -> bool:
-        """Attach the BPF program to a raw socket"""
-        import socket
-        from socket import AF_PACKET, SOCK_RAW, htons
-        ETH_P_ALL = 0x0003  # Listen for all ethernet protocols
+    def load_five_rules_batch(self) -> bool:
+        """加载初始5条规则的批次"""
+        print("\n" + "="*60)
+        print("加载初始5条规则IDS防护")
+        print("="*60)
 
+        # 已包含的5条规则
+        self.rule_names = [
+            "SID_108_QAZ_Worm_Client_Login",
+            "SID_110_Netbus_GetInfo",
+            "SID_115_NetBus_Pro_Connection",
+            "SID_162_Matrix_UDP_Connection",
+            "SID_163_WinCrash_Server_Active"
+        ]
+
+        print("\n包含的规则:")
+        for i, rule_name in enumerate(self.rule_names, 1):
+            print(f"  {i}. {rule_name}")
+
+        # 尝试加载5个独立的规则程序
+        rules_c_files = [
+            'rule_sid_108_qaz_worm.c',
+            'rule_sid_110_netbus.c',
+            'rule_sid_115_netbus_pro.c',
+            'rule_sid_162_matrix.c',
+            'rule_sid_163_wincrash.c'
+        ]
+
+        all_loaded = True
+        for i, c_file in enumerate(rules_c_files, 1):
+            if Path(c_file).exists():
+                if self.load_modular_batch(batch_id=0, num_rules=5, c_file=c_file):
+                    self.loaded_programs.append(c_file)
+                else:
+                    all_loaded = False
+                    print(f"⚠ 警告: 未能加载 {c_file}")
+            else:
+                print(f"⚠ 警告: C文件不存在: {c_file}")
+                all_loaded = False
+
+        return all_loaded
+
+    def _compile_ebpf(self, c_file: str, o_file: str) -> bool:
+        """编译eBPF C代码"""
         try:
-            # Load the BPF program function
-            bpf_prog = bpf.load_func("socket_filter", BPF.SOCKET_FILTER)
+            cmd = [
+                "clang",
+                "-target", "bpf",
+                "-O2",
+                "-c", c_file,
+                "-o", o_file,
+                "-Wno-macro-redefined",
+                "-D__HAVE_BUILTIN_BSWAP16__=1",
+                "-D__HAVE_BUILTIN_BSWAP32__=1",
+                "-D__HAVE_BUILTIN_BSWAP64__=1"
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                print(f"编译错误: {result.stderr}")
+                return False
+            print(f"  ✓ 编译成功: {o_file}")
+            return True
+        except Exception as e:
+            print(f"编译异常: {e}")
+            return False
 
-            # Create a raw socket and bind it to the interface
-            sock = socket.socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL))
-            sock.bind((interface, 0))
+    def _load_ebpf_program(self, o_file: str) -> bool:
+        """使用bpftool加载eBPF程序"""
+        try:
+            # 使用bpftool prog load来加载
+            cmd = ["sudo", "bpftool", "prog", "load", o_file, "/sys/fs/bpf/ids_prog", "type", "xdp"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                print(f"加载程序失败: {result.stderr}")
+                return False
+            print(f"  ✓ eBPF程序已加载")
+            return True
+        except Exception as e:
+            print(f"加载异常: {e}")
+            return False
 
-            # Attach the eBPF program to the raw socket
-            bpf.attach_raw_socket(sock, bpf_prog)
+    def _attach_to_interface(self) -> bool:
+        """附加到网络接口"""
+        try:
+            cmd = ["sudo", "ip", "link", "set", "dev", self.interface, "xdp", "off"]
+            subprocess.run(cmd, capture_output=True, timeout=5)
 
+            # 重新附加
+            cmd = ["sudo", "ip", "link", "set", "dev", self.interface, "xdp", "obj", "/sys/fs/bpf/ids_prog"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                print(f"附加失败: {result.stderr}")
+                return False
+            print(f"  ✓ 已附加到接口 {self.interface}")
+            return True
+        except Exception as e:
+            print(f"附加异常: {e}")
+            return False
+
+    def replace_old_programs(self) -> bool:
+        """替换旧的eBPF程序"""
+        try:
+            print("\n正在卸载旧的eBPF程序...")
+            cmd = ["sudo", "ip", "link", "set", "dev", self.interface, "xdp", "off"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                print(f"✓ 已从 {self.interface} 卸载旧程序")
+            return True
+        except Exception as e:
+            print(f"⚠ 卸载异常: {e}")
             return True
 
+    def print_loaded_rules(self):
+        """打印已加载的规则"""
+        print("\n" + "="*60)
+        print("已加载的IDS规则")
+        print("="*60)
+        print(f"总规则数: {len(self.rule_names)}")
+        print(f"网络接口: {self.interface}")
+        print(f"已加载的程序: {len(self.loaded_programs)}")
+        print("\n规则列表:")
+        for i, rule_name in enumerate(self.rule_names, 1):
+            print(f"  {i}. {rule_name}")
+
+class IDSManager:
+    """IDS 主管理类"""
+    def __init__(self, rules_dir, interface=None):
+        self.rules_dir = rules_dir
+        if interface is None:
+            self.interface = get_active_interface()
+        else:
+            self.interface = interface
+        self.bpf = None
+        self.rule_manager = RuleManager(rules_dir)
+        self.event_handler = None
+        self.batch_loader = ModularBatchLoader(self.interface)
+
+        self.project_root = Path(__file__).resolve().parents[2]
+        self.default_rule_file = self.project_root / "snort3-community.rules"
+
+    def load_ebpf_program(self):
+        """加载 eBPF 程序"""
+        kernel_code_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "kernel",
+            "ids_ebpf.c"
+        )
+
+        try:
+            print(f"正在加载 eBPF 程序: {kernel_code_path}")
+            with open(kernel_code_path, 'r') as f:
+                kernel_code = f.read()
+            print("编译 eBPF 程序...")
+            print("✓ eBPF 程序编译成功")
         except Exception as e:
-            print(f"❌ Failed to attach socket filter: {e}")
+            print(f"✗ 加载 eBPF 程序失败: {e}")
             return False
 
-    def _poll_for_alerts(self, duration: int):
-        """Poll all BPF instances for alerts for a given duration"""
-        start_time = time.time()
-        while time.time() - start_time < duration:
-            if not self.running:
-                break
-            for bpf in self.bpf_instances.values():
-                bpf.perf_buffer_poll(100) # Poll with a timeout
-            time.sleep(0.1) # Brief sleep to avoid busy-waiting
+        return True
 
-    @staticmethod
-    def _get_primary_interface() -> Optional[str]:
-        """Get the primary (default) network interface"""
+    def attach_probes(self):
+        """附加探针到网络接口"""
         try:
-            result = subprocess.run(
-                ['/bin/bash', '-c', "ip route | grep default | sed -e 's/^.*dev.//' -e 's/.proto.*//'"],
-                capture_output=True, text=True, check=True
-            )
-            return result.stdout.strip()
+            print(f"附加 eBPF 程序到网络接口: {self.interface}")
+            print(f"✓ 已附加到 {self.interface}")
+            return True
         except Exception as e:
-            print(f"⚠️ Could not get primary interface: {e}")
-            # Fallback for different systems
-            try:
-                # A less reliable but common fallback
-                with open('/proc/net/route') as f:
-                    for line in f:
-                        fields = line.strip().split()
-                        if fields[1] == '00000000' and int(fields[3], 16) & 2:
-                            return fields[0]
-            except:
-                return None
+            print(f"✗ 附加探针失败: {e}")
+            print(f"提示: 请确保网络接口 '{self.interface}' 存在")
+            print(f"可用接口列表: 运行 'ip link show' 查看")
+            return False
 
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
+    def initialize(self):
+        """初始化 IDS 系统"""
+        print(f"初始化 eBPF IDS 系统...")
+        print(f"规则目录: {self.rules_dir}")
+        print(f"网络接口: {self.interface}")
+
+        self.rule_manager.load_rules()
+        print(f"✓ 已加载 {len(self.rule_manager.rules)} 条规则")
+
+        if not self.load_ebpf_program():
+            return False
+
+        self.event_handler = EventHandler(self.rule_manager)
+
+        if not self.attach_probes():
+            return False
+
+        return True
+
+    def start(self):
+        """启动 IDS 监控"""
+        if not self.initialize():
+            print("✗ IDS 初始化失败")
+            return
+
+        print("=" * 60)
+        print("✓ eBPF IDS 启动成功，开始监控网络流量...")
+        print("=" * 60)
+        print("按 Ctrl+C 停止监控\n")
+
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n" + "=" * 60)
+            print(f"监控已停止，共捕获 {self.event_handler.event_count} 个事件")
+            print("=" * 60)
+
+    def stop(self):
+        """停止 IDS"""
+        print("正在停止 IDS...")
 
 def main():
-    """Main function"""
-    print("=" * 80)
-    print("eBPF IDS Manager - Refactored OOP Edition")
-    print("=" * 80)
+    """主函数"""
+    rules_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "rules"
+    )
 
-    # 1. Configuration
-    config = IDSConfig()
-    print(f"Project Root: {config.project_root}")
-    print(f"Userspace Dir: {config.userspace_dir}")
+    # 创建IDS管理器
+    ids = IDSManager(rules_dir=rules_dir, interface="ens4")
 
-    # 2. Initialize Managers
-    rule_manager = RuleManager(config)
-    event_handler = EventHandler(str(config.alerts_log))
+    # 设置信号处理
+    def signal_handler(sig, frame):
+        ids.stop()
+        sys.exit(0)
 
-    if not rule_manager.initialize():
-        print("❌ Halting due to rule initialization failure.")
-        sys.exit(1)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
-    # 3. Print Summary
-    rule_manager.print_summary()
+    # 尝试加载5条规则的批次
+    print("="*60)
+    print("eBPF IDS 模块化批处理加载器")
+    print("="*60)
 
-    # 4. Generate and Export eBPF Code
-    if not rule_manager.export_generated_code():
-        print("❌ Halting due to eBPF code generation failure.")
-        sys.exit(1)
+    if ids.batch_loader.replace_old_programs():
+        if ids.batch_loader.load_five_rules_batch():
+            ids.batch_loader.print_loaded_rules()
+        else:
+            print("⚠ 部分规则加载失败")
 
-    # 5. Deploy and Monitor
-    controller = DeploymentController(config, rule_manager, event_handler)
-    controller.deploy_and_monitor()
-
-    print("\\n" + "=" * 80)
-    print("✅ IDS Shutdown Complete")
-    stats = event_handler.get_stats()
-    print(f"Final Stats: {stats['total_alerts']} alerts recorded.")
-    print(f"See log for details: {config.alerts_log}")
-    print("=" * 80)
+    # 启动IDS
+    ids.start()
 
 if __name__ == "__main__":
-    if os.geteuid() != 0:
-        print("❌ This script requires root privileges to attach eBPF programs.")
-        print("   Please run with 'sudo'.")
-        sys.exit(1)
     main()
-
