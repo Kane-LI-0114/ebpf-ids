@@ -116,29 +116,40 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
     } else if (ip.protocol == IPPROTO_UDP) {
         inc_counter(DEBUG_UDP_PACKETS);
         struct udphdr udp;
-        bpf_skb_load_bytes(skb, l4_offset, &udp, sizeof(udp));
-        
-        evt->src_port = bpf_ntohs(udp.source);
-        evt->dst_port = bpf_ntohs(udp.dest);
-        
-        // 提取 UDP payload
-        __u32 payload_offset = l4_offset + sizeof(struct udphdr);
-        
-        // 确保 payload_len 非负 - 使用显式的边界检查
-        if (skb->len > payload_offset) {
-            __u32 payload_len = skb->len - payload_offset;
-            
-            // 限制 payload_len 的最大值
-            if (payload_len > 256)
-                payload_len = 256;
-            
-            // 使用位操作确保值为正数（eBPF 验证器要求）
-            payload_len &= 0xFF;
-            
-            if (payload_len > 0) {
-                evt->payload_len = payload_len;
-                bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
-            }
+
+        // 确保 skb 长度够存放 UDP header
+        if (skb->len >= l4_offset + sizeof(udp_hdr)) {
+            bpf_skb_load_bytes(skb, l4_offset, &udp_hdr, sizeof(udp_hdr));
+            evt->src_port = bpf_ntohs(udp_hdr.source);
+            evt->dst_port = bpf_ntohs(udp_hdr.dest);
+
+            // 标记长度为 0，后续再提取 payload
+            evt->payload_len = 0;
+        }
+
+        //bpf_skb_load_bytes(skb, l4_offset, &udp, sizeof(udp));
+        //
+        //evt->src_port = bpf_ntohs(udp.source);
+        //evt->dst_port = bpf_ntohs(udp.dest);
+        //
+        //// 提取 UDP payload
+        //__u32 payload_offset = l4_offset + sizeof(struct udphdr);
+        //
+        //// 确保 payload_len 非负 - 使用显式的边界检查
+        //if (skb->len > payload_offset) {
+        //    __u32 payload_len = skb->len - payload_offset;
+        //    
+        //    // 限制 payload_len 的最大值
+        //    if (payload_len > 256)
+        //        payload_len = 256;
+        //    
+        //    // 使用位操作确保值为正数（eBPF 验证器要求）
+        //    payload_len &= 0xFF;
+        //    
+        //    if (payload_len > 0) {
+        //        evt->payload_len = payload_len;
+        //        bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
+        //    }
         } else {
             evt->payload_len = 0;
         }
