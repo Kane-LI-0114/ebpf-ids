@@ -185,10 +185,9 @@ class RuleManager:
 
         # 转换 payload 为 bytes
         payload_bytes = bytes(payload[:payload_len])
-        # payload_bytes = bytes(payload)[:payload_len]  # 关键修复！
     
         if protocol == 1:
-            search_area = payload_bytes[-depth:]
+            search_area = payload_bytes
         else: # 在指定深度内搜索
             search_area = payload_bytes[:search_len]
         return pattern in search_area
