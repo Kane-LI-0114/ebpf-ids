@@ -146,6 +146,12 @@ class RuleManager:
         
         # 4. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
+            if rule['sid']==221:
+                print(f"[221调试] 事件payload: {event.payload}")
+                print(f"[221调试] 事件payload长度: {event.payload_len}")
+                payload_bytes = bytes(event.payload)[:event.payload_len]
+                result = rule['content'] in payload_bytes
+                print(f"[221调试] 匹配结果: {result}")
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
                 return False
@@ -178,9 +184,6 @@ class RuleManager:
             return False
     
         search_len = min(depth, payload_len) if depth > 0 else payload_len
-    
-        print(f"[简单调试] pattern: {pattern}")
-        print(f"[简单调试] payload_len: {payload_len}")
 
         # 转换 payload 为 bytes
         # payload_bytes = bytes(payload[:payload_len])
