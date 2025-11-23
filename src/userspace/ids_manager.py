@@ -154,12 +154,6 @@ class RuleManager:
                 print(f"[调试] payload={payload_bytes}")
                 print(f"[调试] pattern={pattern}")
 
-                # 搜索匹配
-                idx = payload_bytes.find(target)
-                if idx != -1:
-                    print(f"[调试] ✅ 匹配成功，位置={idx}, 上下文={payload_bytes[max(0,idx-4):idx+8].hex()}")
-                else:
-                    print(f"[调试] ❌ 未找到目标 pattern {target.hex()}")
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
                 return False
