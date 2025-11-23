@@ -129,7 +129,7 @@ class RuleParser:
         # if '\",' in content_str:
             # content_str = content_str.split('\",')[0] + '"'
         if '"' in content_str:
-            content_str = content_str.split('"')[1]
+            content_str = content_str.split('"')[0]
 
         
         # 移除 depth 参数
