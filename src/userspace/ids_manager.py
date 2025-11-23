@@ -149,6 +149,8 @@ class RuleManager:
     
         # 3. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
+            if event.protocol == 1:
+                print(f"[CONTENT调试] payload: {rule['content']}")
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
                 return False
@@ -177,32 +179,17 @@ class RuleManager:
         """
         在 payload 中搜索 pattern
         """
-        print(f"[CONTENT调试] pattern: {pattern.hex()}, 需要长度: {len(pattern)}")
-        print(f"[CONTENT调试] payload_len: {payload_len}")
-    
         if payload_len < len(pattern):
-            print(f"[CONTENT调试] ❌ payload长度不足")
             return False
     
         search_len = min(depth, payload_len) if depth > 0 else payload_len
-        print(f"[CONTENT调试] 搜索长度: {search_len}")
     
-        # 调试：查看前几个字节
-        if payload_len > 0:
-            first_few = [payload[i] for i in range(min(10, payload_len))]
-            print(f"[CONTENT调试] payload前10字节: {bytes(first_few).hex()}")
+        # 转换 payload 为 bytes
+        payload_bytes = bytes(payload[:payload_len])
     
-        # 正确转换
-        payload_bytes = bytes(payload)[:payload_len]
-        print(f"[CONTENT调试] 转换后payload: {payload_bytes.hex()}")
-    
+        # 在指定深度内搜索
         search_area = payload_bytes[:search_len]
-        result = pattern in search_area
-    
-        print(f"[CONTENT调试] 搜索区域: {search_area.hex()}")
-        print(f"[CONTENT调试] 匹配结果: {result}")
-    
-        return result
+        return pattern in search_area
     
     def get_rules(self):
         """获取所有规则"""
