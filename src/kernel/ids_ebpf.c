@@ -148,22 +148,29 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         evt->src_port = 0;
         evt->dst_port = 0;
 
-        // 提取ICMP payload - ICMP头后就是数据
-        __u32 payload_offset = nhoff + sizeof(struct iphdr) + 8; // IP头 + ICMP头(8字节)
+        // 获取 IP 头指针
+        struct iphdr* ip = (struct iphdr*)(skb->data + nhoff);
+        __u32 ip_header_len = ip->ihl * 4;  // IP header 实际长度
+        __u32 icmp_header_len = 8;          // ICMP Echo Request/Reply
 
-        // 确保有payload数据
+        // ICMP payload 偏移
+        __u32 payload_offset = nhoff + ip_header_len + icmp_header_len;
+
+        // 计算 payload 长度
         if (skb->len > payload_offset) {
             __u32 payload_len = skb->len - payload_offset;
 
-            // 限制payload_len的最大值
+            // 限制最大拷贝长度
             if (payload_len > 256)
                 payload_len = 256;
 
-            // 使用位操作确保值为正数
+            // 确保长度正数
             payload_len &= 0xFF;
 
             if (payload_len > 0) {
                 evt->payload_len = payload_len;
+
+                // 从 skb 拷贝 ICMP payload
                 bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
             }
             else {
