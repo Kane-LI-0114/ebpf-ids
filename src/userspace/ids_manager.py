@@ -150,7 +150,7 @@ class RuleManager:
         # 3. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
             if event.protocol == 1:
-                print(f"[CONTENT调试] payload: {rule['content']}")
+                print(f"[CONTENT调试] 实际payload: {event.payload} ")
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
                 return False
