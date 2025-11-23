@@ -146,14 +146,9 @@ class RuleManager:
         
         # 4. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
-            if rule['sid'] == 221:
-                payload_bytes = bytes(event.payload[:event.payload_len])
-                pattern = rule['content']  # b'1234' = 0x31 0x32 0x33 0x34
-
-                # 只打印最关键的信息
-                print(f"[调试] payload={payload_bytes}")
-                print(f"[调试] pattern={pattern}")
-
+            if rule['protocol'] == 1:
+                rule['content'] = rule['content'][-rule['content_depth']:]
+            
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
                 return False
