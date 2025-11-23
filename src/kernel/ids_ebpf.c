@@ -142,6 +142,37 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         } else {
             evt->payload_len = 0;
         }
+    } else if (ip.protocol == IPPROTO_ICMP) {
+        inc_counter(DEBUG_ICMP_PACKETS);
+        // ICMP没有端口概念
+        evt->src_port = 0;
+        evt->dst_port = 0;
+
+        // 提取ICMP payload - ICMP头后就是数据
+        __u32 payload_offset = nhoff + sizeof(struct iphdr) + 8; // IP头 + ICMP头(8字节)
+
+        // 确保有payload数据
+        if (skb->len > payload_offset) {
+            __u32 payload_len = skb->len - payload_offset;
+
+            // 限制payload_len的最大值
+            if (payload_len > 256)
+                payload_len = 256;
+
+            // 使用位操作确保值为正数
+            payload_len &= 0xFF;
+
+            if (payload_len > 0) {
+                evt->payload_len = payload_len;
+                bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
+            }
+            else {
+                evt->payload_len = 0;
+            }
+        }
+        else {
+            evt->payload_len = 0;
+        }
     } else {
         evt->src_port = 0;
         evt->dst_port = 0;
