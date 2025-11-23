@@ -124,6 +124,10 @@ class RuleParser:
         """
         if not content_str:
             return (b'', 0)
+
+        # 新增：从 \", 截断，忽略后面的所有options
+        if '\",' in content_str:
+            content_str = content_str.split('\",')[0] + '"'
         
         # 移除 depth 参数
         depth = 0
@@ -136,7 +140,6 @@ class RuleParser:
         
         # 移除引号和其他选项
         content_str = content_str.strip('"\'')
-        content_str = content_str.replace('\\"', '"')  # 把 \" 替换成 "
         content_str = re.sub(r',\s*(nocase|fast_pattern|offset\s+\d+|distance\s+\d+|within\s+\d+).*', '', content_str)
         
         result = bytearray()
