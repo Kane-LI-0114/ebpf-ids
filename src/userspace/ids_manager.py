@@ -146,6 +146,9 @@ class RuleManager:
         
         # 4. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
+            if rule['sid']==225:
+                print(f"[调试]payload: {event.payload}");
+                print(f"[调试]rule content: {rule['content']}");
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth'], rule['protocol']):
                 return False
