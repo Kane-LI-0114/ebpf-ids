@@ -17,8 +17,6 @@ from bcc import BPF
 from datetime import datetime
 from dataclasses import dataclass, field
 
-from ctypes import c_ubyte
-
 @dataclass
 class DebugConfig:
     """调试配置"""
@@ -148,17 +146,8 @@ class RuleManager:
         
         # 4. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
-            if rule['protocol'] == 1:
-                actual_len = rule['content_depth']
-                # 创建新的 c_ubyte_Array_256
-                new_payload = (c_ubyte * 256)()
-                for i in range(actual_len):
-                    new_payload[i] = event.payload[event.payload_len - actual_len + i]
-                event.payload = new_payload
-                event.payload_len = actual_len
-
             if not self._match_content(rule['content'], event.payload, 
-                                       event.payload_len, rule['content_depth']):
+                                       event.payload_len, rule['content_depth'], rule['protocol']):
                 return False
         
         return True
@@ -181,7 +170,7 @@ class RuleManager:
         
         return False
     
-    def _match_content(self, pattern, payload, payload_len, depth):
+    def _match_content(self, pattern, payload, payload_len, depth, protocol):
         """
         在 payload 中搜索 pattern
         """
@@ -194,8 +183,10 @@ class RuleManager:
         payload_bytes = bytes(payload[:payload_len])
         # payload_bytes = bytes(payload)[:payload_len]  # 关键修复！
     
-        # 在指定深度内搜索
-        search_area = payload_bytes[:search_len]
+        if protocol == 1:
+            search_area = payload_bytes[-depth:]
+        else: # 在指定深度内搜索
+            search_area = payload_bytes[:search_len]
         return pattern in search_area
     
     def get_rules(self):
