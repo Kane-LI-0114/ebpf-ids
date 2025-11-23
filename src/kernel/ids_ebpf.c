@@ -118,10 +118,10 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         struct udphdr udp;
 
         // 确保 skb 长度够存放 UDP header
-        if (skb->len >= l4_offset + sizeof(udp_hdr)) {
-            bpf_skb_load_bytes(skb, l4_offset, &udp_hdr, sizeof(udp_hdr));
-            evt->src_port = bpf_ntohs(udp_hdr.source);
-            evt->dst_port = bpf_ntohs(udp_hdr.dest);
+        if (skb->len >= l4_offset + sizeof(udp)) {
+            bpf_skb_load_bytes(skb, l4_offset, &udp, sizeof(udp));
+            evt->src_port = bpf_ntohs(udp.source);
+            evt->dst_port = bpf_ntohs(udp.dest);
 
             // 标记长度为 0，后续再提取 payload
             evt->payload_len = 0;
