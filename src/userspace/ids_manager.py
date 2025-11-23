@@ -180,7 +180,8 @@ class RuleManager:
         search_len = min(depth, payload_len) if depth > 0 else payload_len
     
         # 转换 payload 为 bytes
-        payload_bytes = bytes(payload[:payload_len])
+        # payload_bytes = bytes(payload[:payload_len])
+        payload_bytes = bytes(payload)[:payload_len]  # 关键修复！
     
         # 在指定深度内搜索
         search_area = payload_bytes[:search_len]
@@ -255,19 +256,6 @@ class EventHandler:
             
             if should_print or self.event_count % debug.print_interval == 0:
                 print(f"[调试] 事件#{self.event_count} | {protocol_name} | {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} | Payload: {event.payload_len}B")
-
-        # 测试
-        if event.protocol == 1:  # ICMP
-            payload_bytes = bytes(event.payload)[:event.payload_len]
-            print(f"[ICMP详细调试] payload长度: {event.payload_len}")
-            print(f"[ICMP详细调试] payload(hex): {payload_bytes.hex()}")
-            print(f"[ICMP详细调试] payload(ascii): {repr(payload_bytes)}")
-    
-            # 检查是否包含1234
-            if b'1234' in payload_bytes:
-                print(f"[ICMP详细调试] ✅ payload包含'1234'")
-            else:
-                print(f"[ICMP详细调试] ❌ payload不包含'1234'")
         
         # 匹配规则
         matched_rules = self.rule_manager.match_rule(event)
