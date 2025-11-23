@@ -151,17 +151,24 @@ class RuleManager:
                 print(f"[221调试] 事件payload长度: {event.payload_len}")
                 payload_bytes = bytes([event.payload[i] for i in range(event.payload_len)])
                 print(f"[221调试] payload内容(hex): {payload_bytes.hex()}")
-                # 检查规则content
-                print(f"[221调试] 规则content: {rule['content']}")
-                print(f"[221调试] 规则content类型: {type(rule['content'])}")
-                print(f"[221调试] 规则content长度: {len(rule['content']) if rule['content'] else 0}")
     
-                # 如果规则content是bytes，显示十六进制
-                if isinstance(rule['content'], bytes):
-                    print(f"[221调试] 规则content(hex): {rule['content'].hex()}")
+                # 详细检查匹配过程
+                pattern = rule['content']
+                print(f"[221详细调试] pattern: {pattern} (len={len(pattern)})")
+                print(f"[221详细调试] 搜索整个payload...")
     
-                result = rule['content'] in payload_bytes
-                print(f"[221调试] 匹配结果: {result}")
+                # 手动搜索
+                for i in range(len(payload_bytes) - len(pattern) + 1):
+                    if payload_bytes[i:i+len(pattern)] == pattern:
+                        print(f"[221详细调试] ✅ 在位置 {i} 找到匹配！")
+                        print(f"[221详细调试] 匹配内容: {payload_bytes[i:i+len(pattern)].hex()}")
+                        break
+                else:
+                    print(f"[221详细调试] ❌ 在整个payload中未找到pattern")
+    
+                # 测试in操作符
+                result = pattern in payload_bytes
+                print(f"[221调试] 'in'操作符结果: {result}")
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
                 return False
