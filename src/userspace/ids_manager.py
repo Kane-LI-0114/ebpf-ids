@@ -147,8 +147,13 @@ class RuleManager:
         # 4. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
             if rule['protocol'] == 1:
-                event.payload = event.payload[-rule['content_depth']:]
-                event.payload_len = len(event.payload)
+                actual_len = rule['content_depth']
+                # 创建新的 c_ubyte_Array_256
+                new_payload = (c_ubyte * 256)()
+                for i in range(actual_len):
+                    new_payload[i] = event.payload[event.payload_len - actual_len + i]
+                event.payload = new_payload
+                event.payload_len = actual_len
 
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
