@@ -146,26 +146,6 @@ class RuleManager:
         
         # 4. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
-            if rule['sid']==221:
-                payload_bytes = bytes([event.payload[i] for i in range(event.payload_len)])
-                pattern = rule['content']  # b'1234' = 0x31 0x32 0x33 0x34
-    
-                print(f"[绝对验证] payload: {payload_bytes.hex()}")
-                print(f"[绝对验证] pattern: {pattern.hex()} (ASCII: {pattern})")
-    
-                # 绝对正确的搜索
-                target = bytes.fromhex('31323334')  # 明确的十六进制目标
-                print(f"[绝对验证] 搜索目标: {target.hex()}")
-    
-                for i in range(len(payload_bytes) - 3):
-                    if payload_bytes[i:i+4] == target:
-                        print(f"[绝对验证] ✅ 在位置 {i} 找到匹配!")
-                        print(f"[绝对验证] 上下文: ...{payload_bytes[max(0,i-4):i+8].hex()}...")
-                        break
-                else:
-                    print(f"[绝对验证] ❌ 未找到 {target.hex()}")
-                    # 检查前几个位置
-                    print(f"[绝对验证] 前16字节: {payload_bytes[:16].hex()}")
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
                 return False
@@ -200,8 +180,8 @@ class RuleManager:
         search_len = min(depth, payload_len) if depth > 0 else payload_len
 
         # 转换 payload 为 bytes
-        # payload_bytes = bytes(payload[:payload_len])
-        payload_bytes = bytes(payload)[:payload_len]  # 关键修复！
+        payload_bytes = bytes(payload[:payload_len])
+        # payload_bytes = bytes(payload)[:payload_len]  # 关键修复！
     
         # 在指定深度内搜索
         search_area = payload_bytes[:search_len]
