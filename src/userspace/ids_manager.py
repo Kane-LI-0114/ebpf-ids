@@ -180,8 +180,9 @@ class RuleManager:
         search_len = min(depth, payload_len) if depth > 0 else payload_len
 
         # 转换 payload 为 bytes
-        payload_bytes = bytes(payload[:payload_len])
+        # payload_bytes = bytes(payload[:payload_len])
         # payload_bytes = bytes(payload)[:payload_len]  # 关键修复！
+        payload_bytes = bytes([payload[i] for i in range(payload_len)])
     
         # 在指定深度内搜索
         search_area = payload_bytes[:search_len]
