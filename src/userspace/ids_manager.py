@@ -179,13 +179,12 @@ class RuleManager:
         """
         if payload_len < len(pattern):
             return False
-        
+    
         search_len = min(depth, payload_len) if depth > 0 else payload_len
-        
-        # 转换 payload 为 bytes
-        payload_bytes = bytes(payload[:payload_len])
-        
-        # 在指定深度内搜索
+    
+        # 修复：先转bytes再切片
+        payload_bytes = bytes(payload)[:payload_len]
+    
         search_area = payload_bytes[:search_len]
         return pattern in search_area
     
