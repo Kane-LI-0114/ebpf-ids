@@ -136,16 +136,18 @@ class RuleManager:
         if rule['protocol'] != 0 and rule['protocol'] != event.protocol:
             return False
     
-        # 2. 智能端口检查：只有规则指定了端口时才检查
-        if rule['src_port'][0] != 0:  # 如果不是"any"端口
+        # 2. 对于ICMP协议，跳过端口检查
+        if event.protocol == 1:  # ICMP
+            # ICMP没有端口概念，只要协议匹配就继续检查content
+            pass
+        else:
+            # 对于TCP/UDP，检查端口
             if not self._match_port(rule['src_port'], event.src_port):
                 return False
-    
-        if rule['dst_port'][0] != 0:  # 如果不是"any"端口  
             if not self._match_port(rule['dst_port'], event.dst_port):
                 return False
     
-        # 3. 匹配content
+        # 3. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
