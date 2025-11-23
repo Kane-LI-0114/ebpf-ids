@@ -17,6 +17,8 @@ from bcc import BPF
 from datetime import datetime
 from dataclasses import dataclass, field
 
+from ctypes import c_ubyte
+
 @dataclass
 class DebugConfig:
     """调试配置"""
