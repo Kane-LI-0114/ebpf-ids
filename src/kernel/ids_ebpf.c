@@ -150,9 +150,9 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         //        evt->payload_len = payload_len;
         //        bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
         //    }
-        } else {
+        /*} else {
             evt->payload_len = 0;
-        }
+        }*/
     } else if (ip.protocol == IPPROTO_ICMP) {
         inc_counter(DEBUG_ICMP_PACKETS);
         // ICMP没有端口概念
