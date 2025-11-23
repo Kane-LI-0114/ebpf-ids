@@ -136,6 +136,7 @@ class RuleParser:
         
         # 移除引号和其他选项
         content_str = content_str.strip('"\'')
+        content_str = content_str.replace('\\"', '"')  # 把 \" 替换成 "
         content_str = re.sub(r',\s*(nocase|fast_pattern|offset\s+\d+|distance\s+\d+|within\s+\d+).*', '', content_str)
         
         result = bytearray()

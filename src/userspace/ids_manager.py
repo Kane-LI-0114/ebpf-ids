@@ -146,22 +146,6 @@ class RuleManager:
         
         # 4. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
-            if rule['sid']==221:
-                print(f"[221调试] 事件payload: {event.payload}")
-                print(f"[221调试] 事件payload长度: {event.payload_len}")
-                payload_bytes = bytes(event.payload)[:event.payload_len]
-                print(f"[221调试] payload内容(hex): {payload_bytes.hex()}")
-                # 检查规则content
-                print(f"[221调试] 规则content: {rule['content']}")
-                print(f"[221调试] 规则content类型: {type(rule['content'])}")
-                print(f"[221调试] 规则content长度: {len(rule['content']) if rule['content'] else 0}")
-    
-                # 如果规则content是bytes，显示十六进制
-                if isinstance(rule['content'], bytes):
-                    print(f"[221调试] 规则content(hex): {rule['content'].hex()}")
-    
-                result = rule['content'] in payload_bytes
-                print(f"[221调试] 匹配结果: {result}")
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
                 return False
