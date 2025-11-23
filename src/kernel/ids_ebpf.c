@@ -144,41 +144,33 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
         }
     } else if (ip.protocol == IPPROTO_ICMP) {
         inc_counter(DEBUG_ICMP_PACKETS);
+
         // ICMP没有端口概念
         evt->src_port = 0;
         evt->dst_port = 0;
 
-        // 获取 IP 头指针
-        struct iphdr* ip = (struct iphdr*)(skb->data + nhoff);
-        __u32 ip_header_len = ip->ihl * 4;  // IP header 实际长度
-        __u32 icmp_header_len = 8;          // ICMP Echo Request/Reply
-
-        // ICMP payload 偏移
-        __u32 payload_offset = nhoff + ip_header_len + icmp_header_len;
-
-        // 计算 payload 长度
-        if (skb->len > payload_offset) {
-            __u32 payload_len = skb->len - payload_offset;
-
-            // 限制最大拷贝长度
-            if (payload_len > 256)
-                payload_len = 256;
-
-            // 确保长度正数
-            payload_len &= 0xFF;
-
-            if (payload_len > 0) {
-                evt->payload_len = payload_len;
-
-                // 从 skb 拷贝 ICMP payload
-                bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len);
-            }
-            else {
-                evt->payload_len = 0;
-            }
-        }
-        else {
+        // 1️⃣ 计算 IP header 长度
+        __u8 ip_ihl = 0;
+        if (bpf_skb_load_bytes(skb, nhoff, &ip_ihl, 1) < 0) {
             evt->payload_len = 0;
+            return 0;
+        }
+        __u32 ip_header_len = (ip_ihl & 0x0F) * 4;
+
+        // 2️⃣ 计算 ICMP payload 偏移
+        __u32 payload_offset = nhoff + ip_header_len + 8; // ICMP header 8字节
+        __u32 payload_len = skb->len > payload_offset ? skb->len - payload_offset : 0;
+
+        // 3️⃣ 限制 payload_len
+        if (payload_len > 256)
+            payload_len = 256;
+
+        evt->payload_len = payload_len;
+
+        // 4️⃣ 拷贝 payload（干净，不带 IP/ICMP header）
+        if (payload_len > 0) {
+            if (bpf_skb_load_bytes(skb, payload_offset, evt->payload, payload_len) < 0)
+                evt->payload_len = 0;
         }
     } else {
         evt->src_port = 0;
