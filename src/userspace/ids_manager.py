@@ -146,6 +146,21 @@ class RuleManager:
         
         # 4. 匹配 content (如果有)
         if rule['content'] and len(rule['content']) > 0:
+            if rule['sid'] == 221:
+                payload_bytes = bytes(event.payload[:event.payload_len])
+                pattern = rule['content']  # b'1234' = 0x31 0x32 0x33 0x34
+                target = bytes.fromhex('31323334')  # 明确的十六进制目标
+
+                # 只打印最关键的信息
+                print(f"[调试] payload_len={len(payload_bytes)}, payload前16字节={payload_bytes[:16].hex()}")
+                print(f"[调试] pattern={pattern.hex()}")
+
+                # 搜索匹配
+                idx = payload_bytes.find(target)
+                if idx != -1:
+                    print(f"[调试] ✅ 匹配成功，位置={idx}, 上下文={payload_bytes[max(0,idx-4):idx+8].hex()}")
+                else:
+                    print(f"[调试] ❌ 未找到目标 pattern {target.hex()}")
             if not self._match_content(rule['content'], event.payload, 
                                        event.payload_len, rule['content_depth']):
                 return False
@@ -180,8 +195,8 @@ class RuleManager:
         search_len = min(depth, payload_len) if depth > 0 else payload_len
 
         # 转换 payload 为 bytes
-        payload_bytes = bytes(payload[:payload_len])
-        # payload_bytes = bytes(payload)[:payload_len]  # 关键修复！
+        # payload_bytes = bytes(payload[:payload_len])
+        payload_bytes = bytes(payload)[:payload_len]  # 关键修复！
     
         # 在指定深度内搜索
         search_area = payload_bytes[:search_len]
