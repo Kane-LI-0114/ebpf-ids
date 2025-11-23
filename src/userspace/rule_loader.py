@@ -126,8 +126,11 @@ class RuleParser:
             return (b'', 0)
 
         # 新增：从 \", 截断，忽略后面的所有options
-        if '\",' in content_str:
-            content_str = content_str.split('\",')[0] + '"'
+        # if '\",' in content_str:
+            # content_str = content_str.split('\",')[0] + '"'
+        if '"' in content_str:
+            content_str = content_str.split('"')[1]
+
         
         # 移除 depth 参数
         depth = 0
