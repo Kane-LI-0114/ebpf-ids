@@ -20,6 +20,8 @@ import array
 from bcc import BPF
 from datetime import datetime
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
 
 
 @dataclass
@@ -213,6 +215,31 @@ class EventHandler:
        self.tcp_count = 0
        self.udp_count = 0
        self.icmp_count = 0
+       self.log_path = "/var/log/snort_alert.log"
+
+    
+
+
+   def _log_alert(self, action, protocol, src_ip, src_port,dst_ip, dst_port, options_str):
+
+        # 生成 ISO8601 时间戳，如 2025-11-23T12:04:22+00:00
+        now = datetime.now(timezone.utc).isoformat()
+
+        line = (
+            f"{now} {action} {protocol} "
+            f"{src_ip} {src_port} -> {dst_ip} {dst_port} "
+            f"({options_str})\n"
+        )
+
+        try:
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except PermissionError:
+            # 如果没有权限写入 /var/log，可以在这里打印一次警告
+            print(f"[WARN] Cannot write to {self.log_path}, "
+                  f"please check permissions (need root).")
+        except Exception as e:
+            print(f"[WARN] Failed to write alert log: {e}")   
       
    def handle_event(self, cpu, data, size):
        """处理 eBPF 事件"""
@@ -293,6 +320,17 @@ class EventHandler:
            print(f"Source address: {src_ip}:{event.src_port}")
            print(f"Target address: {dst_ip}:{event.dst_port}")
            print(f"{'='*80}\n")
+           # 记录到 Snort 风格日志
+           anomaly_options = f'msg:"{anomaly_msg}"; anomaly_type:{event.anomaly_type};'
+           self._log_alert(
+                action="alert",
+                protocol=protocol_name.lower(),  # "tcp"/"udp"/"icmp"
+                src_ip=src_ip,
+                src_port=event.src_port,
+                dst_ip=dst_ip,
+                dst_port=event.dst_port,
+                options_str=anomaly_options,
+            )
 
        if matched_rules:
            # 有规则匹配，生成告警
@@ -325,6 +363,33 @@ class EventHandler:
                    print(f"Packet payload: {self._format_payload(bytes(event.payload[:min(32, event.payload_len)]))}")
               
                print(f"{'='*80}\n")
+               # 组装 Snort 风格 options
+               options_parts = []
+               if "msg" in rule:
+                    options_parts.append(f'msg:"{rule["msg"]}"')
+               if "classtype" in rule and rule["classtype"]:
+                    options_parts.append(f"classtype:{rule['classtype']}")
+               if "priority" in rule and rule["priority"] is not None:
+                    options_parts.append(f"priority:{rule['priority']}")
+               if "sid" in rule:
+                    options_parts.append(f"sid:{rule['sid']}")
+
+               options_str = "; ".join(options_parts) + ";"
+
+                # 如果你在 RuleParser 里有原始 option 字符串，例如 rule["options_raw"]，
+                # 可以用下面这一行覆盖上面的拼接：
+                # options_str = rule.get("options_raw", options_str)
+
+               self._log_alert(
+                    action="alert",
+                    protocol=protocol_name.lower(),
+                    src_ip=src_ip,
+                    src_port=event.src_port,
+                    dst_ip=dst_ip,
+                    dst_port=event.dst_port,
+                    options_str=options_str,
+                )
+            
        # else 分支已被调试输出替代
   
    def format_ip(self, ip_int):
