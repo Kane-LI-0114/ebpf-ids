@@ -7,6 +7,9 @@
 #include <uapi/linux/in.h>
 #include <uapi/linux/pkt_cls.h>
 
+// 控制是否屏蔽来自 35.235.x.x 的数据包
+#define BLOCK_35_235_SUBNET 1  // 设置为 1 启用屏蔽，0 禁用屏蔽
+
 // 定义事件数据结构
 struct packet_event {
     __u32 src_ip;
@@ -74,6 +77,18 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
     // 读取 IP 头部信息
     struct iphdr ip;
     bpf_skb_load_bytes(skb, nhoff, &ip, sizeof(ip));
+    
+#if BLOCK_35_235_SUBNET
+    // 屏蔽来自 35.235.x.x 的数据包
+    // 35.235.x.x 的网络字节序前两个字节: 0x23 (35) 和 0xEB (235)
+    __u32 src_ip_host = bpf_ntohl(ip.saddr);
+    __u8 first_octet = (src_ip_host >> 24) & 0xFF;
+    __u8 second_octet = (src_ip_host >> 16) & 0xFF;
+    
+    if (first_octet == 35 && second_octet == 235) {
+        return -1;  // 丢弃来自 35.235.x.x 的数据包
+    }
+#endif
     
     // 填充基本 IP 信息
     evt->src_ip = ip.saddr;
