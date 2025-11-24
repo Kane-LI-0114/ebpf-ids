@@ -7,8 +7,8 @@
 #include <uapi/linux/in.h>
 #include <uapi/linux/pkt_cls.h>
 
-// 控制是否屏蔽来自 35.235.x.x 的数据包
-#define BLOCK_35_235_SUBNET 1  // 设置为 1 启用屏蔽，0 禁用屏蔽
+// 控制是否只接收来自 10.10.1.3 的数据包
+#define ALLOW_ONLY_10_10_1_3 1  // 设置为 1 启用白名单，0 禁用
 
 // 定义事件数据结构
 struct packet_event {
@@ -79,15 +79,16 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
     struct iphdr ip;
     bpf_skb_load_bytes(skb, nhoff, &ip, sizeof(ip));
     
-#if BLOCK_35_235_SUBNET
-    // 屏蔽来自 35.235.x.x 的数据包
-    // 35.235.x.x 的网络字节序前两个字节: 0x23 (35) 和 0xEB (235)
+#if ALLOW_ONLY_10_10_1_3
+    // 只接收来自 10.10.1.3 的数据包
     __u32 src_ip_host = bpf_ntohl(ip.saddr);
-    __u8 first_octet = (src_ip_host >> 24) & 0xFF;
-    __u8 second_octet = (src_ip_host >> 16) & 0xFF;
+    __u8 octet1 = (src_ip_host >> 24) & 0xFF;
+    __u8 octet2 = (src_ip_host >> 16) & 0xFF;
+    __u8 octet3 = (src_ip_host >> 8) & 0xFF;
+    __u8 octet4 = src_ip_host & 0xFF;
     
-    if (first_octet == 35 && second_octet == 235) {
-        return -1;  // 丢弃来自 35.235.x.x 的数据包
+    if (octet1 != 10 || octet2 != 10 || octet3 != 1 || octet4 != 3) {
+        return -1;  // 丢弃非 10.10.1.3 的数据包
     }
 #endif
     
