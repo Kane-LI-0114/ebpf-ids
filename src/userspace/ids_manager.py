@@ -228,6 +228,7 @@ class EventHandler:
                ("src_port", ct.c_uint16),
                ("dst_port", ct.c_uint16),
                ("protocol", ct.c_uint8),
+               ("anomaly_type", ct.c_uint8),
                ("payload_len", ct.c_uint32),
                ("payload", ct.c_uint8 * 256)
            ]
@@ -270,6 +271,29 @@ class EventHandler:
        # 匹配规则
        matched_rules = self.rule_manager.match_rule(event)
       
+       # 处理内核检测到的异常
+       if event.anomaly_type > 0:
+           self.alert_count += 1
+           timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+           
+           anomaly_msg = "Unknown Anomaly"
+           if event.anomaly_type == 1: anomaly_msg = "Potential DDoS Attack (High Connection Rate)"
+           elif event.anomaly_type == 2: anomaly_msg = "Suspicious High Port Connection (>50000)"
+           elif event.anomaly_type == 3: anomaly_msg = "Abnormal Payload Size"
+           elif event.anomaly_type == 4: anomaly_msg = "Suspicious Shell Command Pattern"
+           elif event.anomaly_type == 5: anomaly_msg = "Suspicious XSS Pattern"
+           elif event.anomaly_type == 6: anomaly_msg = "Invalid Source IP (0.0.0.0)"
+
+           print(f"\n{'='*80}")
+           print(f"[ANOMALY ALERT #{self.alert_count}] {timestamp}")
+           print(f"{'='*80}")
+           print(f"Type: Anomaly Detection | ID: {event.anomaly_type}")
+           print(f"Message: {anomaly_msg}")
+           print(f"Protocol: {protocol_name}")
+           print(f"Source address: {src_ip}:{event.src_port}")
+           print(f"Target address: {dst_ip}:{event.dst_port}")
+           print(f"{'='*80}\n")
+
        if matched_rules:
            # 有规则匹配，生成告警
            for rule in matched_rules:

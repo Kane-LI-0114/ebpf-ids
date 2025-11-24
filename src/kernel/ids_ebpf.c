@@ -17,6 +17,7 @@ struct packet_event {
     __u16 src_port;
     __u16 dst_port;
     __u8 protocol;
+    __u8 anomaly_type;
     __u32 payload_len;
     __u8 payload[256];
 };
@@ -273,7 +274,7 @@ static inline int analyze_protocol(struct packet_event *evt) {
 }
 
 // 异常检测函数
-static inline int detect_anomaly(struct packet_event *evt) {
+static inline void detect_anomaly(struct packet_event *evt) {
     // 检测大量连接（可能的 DDoS）
     __u64 dst_key = evt->dst_ip;
     __u32 *dst_count = connection_state.lookup(&dst_key);
@@ -282,7 +283,8 @@ static inline int detect_anomaly(struct packet_event *evt) {
         (*dst_count)++;
         // DDoS 检测阈值
         if (*dst_count > 1000) {
-            return 1;  // 检测到异常流量
+            evt->anomaly_type = 1;  // 检测到异常流量
+            return;
         }
     } else {
         __u32 initial_count = 1;
@@ -291,24 +293,28 @@ static inline int detect_anomaly(struct packet_event *evt) {
     
     // 检测异常端口（高端口号）
     if (evt->dst_port > 50000) {
-        return 1;
+        evt->anomaly_type = 2;
+        return;
     }
     
     // 检测可疑的 payload 大小
     if (evt->payload_len > 0) {
         // 检测异常大的数据包
         if (evt->payload_len >= 200) {
-            return 1;
+            evt->anomaly_type = 3;
+            return;
         }
         
         // 检测 payload 中的可疑模式
         // 简单检查是否包含 shell 命令特征
         for (int i = 0; i < evt->payload_len - 1 && i < 255; i++) {
             if (evt->payload[i] == '/' && evt->payload[i+1] == 'b') {
-                return 1;  // 可能包含 /bin/sh 等
+                evt->anomaly_type = 4;  // 可能包含 /bin/sh 等
+                return;
             }
             if (evt->payload[i] == '<' && evt->payload[i+1] == 's') {
-                return 1;  // 可能包含 <script> XSS 攻击
+                evt->anomaly_type = 5;  // 可能包含 <script> XSS 攻击
+                return;
             }
         }
     }
@@ -319,10 +325,9 @@ static inline int detect_anomaly(struct packet_event *evt) {
     
     // 检测来自 0.0.0.0 的流量
     if (src_ip == 0) {
-        return 1;
+        evt->anomaly_type = 6;
+        return;
     }
-    
-    return 0;
 }
 
 // 主钩子函数 - 网络过滤器
@@ -335,16 +340,18 @@ int ids_filter(struct __sk_buff *skb) {
     }
     
     // 规则匹配
-    if (match_rules(&evt) > 0) {
-        inc_counter(DEBUG_EVENTS_SUBMITTED);
-        events.perf_submit(skb, &evt, sizeof(evt));
-    }
+    int matched = match_rules(&evt);
     
     // 协议分析
     analyze_protocol(&evt);
     
     // 异常检测
     detect_anomaly(&evt);
+    
+    if (matched > 0 || evt.anomaly_type > 0) {
+        inc_counter(DEBUG_EVENTS_SUBMITTED);
+        events.perf_submit(skb, &evt, sizeof(evt));
+    }
     
     return 0;
 }
