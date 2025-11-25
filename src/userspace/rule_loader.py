@@ -61,10 +61,10 @@ class RuleLoader:
             
             # 只加载 snort_rules_ebpf.json
             if filename == 'snort_rules_ebpf.json':
-                print(f"正在加载规则文件: {filename}")
+                print(f"Now loading Rule file: {filename}")
                 rule_data = self.load_from_json(filepath)
                 if rule_data and isinstance(rule_data, list):
-                    print(f"  ✓ 成功加载 {len(rule_data)} 条规则")
+                    print(f"  ✓ Successful load {len(rule_data)} number of rules")
                     return rule_data
             elif filename.endswith('.json'):
                 rule_data = self.load_from_json(filepath)
