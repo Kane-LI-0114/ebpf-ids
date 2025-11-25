@@ -18,6 +18,8 @@ struct packet_event {
     __u16 dst_port;
     __u8 protocol;
     __u8 anomaly_type;
+    __u8 app_proto;     // 新增：应用层协议标识
+    __u8 _pad;          // 填充对齐
     __u32 payload_len;
     __u8 payload[256];
 };
@@ -32,7 +34,12 @@ struct match_result {
 // eBPF Maps 定义
 BPF_PERF_OUTPUT(events);
 BPF_HASH(rule_cache, __u32, __u32);
-BPF_HASH(connection_state, __u64, __u32);
+// 使用 LRU Hash 避免内存泄漏
+BPF_TABLE("lru_hash", __u64, __u32, connection_state, 10240);
+// 新增：监控端口 Map，由用户空间动态更新
+BPF_HASH(monitored_ports, __u16, __u8);
+// 新增：Per-CPU Array 用于临时存储事件数据，避免栈溢出
+BPF_PERCPU_ARRAY(packet_event_heap, struct packet_event, 1);
 
 // 调试计数器
 BPF_ARRAY(debug_counters, __u64, 10);
@@ -180,22 +187,20 @@ static inline int match_rules(struct packet_event *evt) {
         return 1;
     }
     
-    // 临时：捕获所有 TCP 流量用于调试
-    if (evt->protocol == IPPROTO_TCP) {
-        inc_counter(DEBUG_MATCHED_PACKETS);
-        return 1;
-    }
-    
-    // 临时：捕获所有 UDP 流量用于调试
-    if (evt->protocol == IPPROTO_UDP) {
-        inc_counter(DEBUG_MATCHED_PACKETS);
-        return 1;
-    }
-    
     if (!rule_count)
         return 0;
     
-    // 检查常见攻击端口
+    // 动态端口检查：检查目的端口是否在监控列表中
+    if (evt->protocol == IPPROTO_TCP || evt->protocol == IPPROTO_UDP) {
+        __u16 port = evt->dst_port;
+        __u8 *exists = monitored_ports.lookup(&port);
+        if (exists) {
+            inc_counter(DEBUG_MATCHED_PACKETS);
+            return 1;
+        }
+    }
+    
+    // 检查常见攻击端口 (保留作为后备或特定逻辑)
     if (evt->protocol == IPPROTO_TCP) {
         // SSH 暴力破解检测 (端口 22)
         if (evt->dst_port == 22) {
@@ -210,16 +215,12 @@ static inline int match_rules(struct packet_event *evt) {
         }
     }
     
-    // 捕获所有 UDP 流量
-    if (evt->protocol == IPPROTO_UDP) {
-        return 1;
-    }
-    
     // 检查扫描行为
     __u64 conn_key = ((__u64)evt->src_ip << 32) | evt->dst_ip;
     __u32 *conn_count = connection_state.lookup(&conn_key);
     if (conn_count) {
-        (*conn_count)++;
+        // 使用原子操作增加计数
+        __sync_fetch_and_add(conn_count, 1);
         if (*conn_count > 100) {  // 端口扫描阈值
             return 1;
         }
@@ -242,20 +243,24 @@ static inline int analyze_protocol(struct packet_event *evt) {
                 // 简单检查是否为 HTTP 请求
                 if (evt->payload[0] == 'G' && evt->payload[1] == 'E' && 
                     evt->payload[2] == 'T' && evt->payload[3] == ' ') {
+                    evt->app_proto = 1; // HTTP
                     return 1;  // HTTP GET 请求
                 }
                 if (evt->payload[0] == 'P' && evt->payload[1] == 'O' && 
                     evt->payload[2] == 'S' && evt->payload[3] == 'T') {
+                    evt->app_proto = 1; // HTTP
                     return 1;  // HTTP POST 请求
                 }
             }
         }
         // FTP 协议检测
         else if (evt->dst_port == 21) {
+            evt->app_proto = 2; // FTP
             return 1;
         }
         // SSH 协议检测
         else if (evt->dst_port == 22) {
+            evt->app_proto = 3; // SSH
             return 1;
         }
     }
@@ -263,10 +268,12 @@ static inline int analyze_protocol(struct packet_event *evt) {
     else if (evt->protocol == IPPROTO_UDP) {
         // DNS 协议检测 (端口 53)
         if (evt->dst_port == 53 || evt->src_port == 53) {
+            evt->app_proto = 4; // DNS
             return 1;
         }
         // DHCP 协议检测
         else if (evt->dst_port == 67 || evt->dst_port == 68) {
+            evt->app_proto = 5; // DHCP
             return 1;
         }
     }
@@ -281,7 +288,8 @@ static inline void detect_anomaly(struct packet_event *evt) {
     __u32 *dst_count = connection_state.lookup(&dst_key);
     
     if (dst_count) {
-        (*dst_count)++;
+        // 使用原子操作增加计数
+        __sync_fetch_and_add(dst_count, 1);
         // DDoS 检测阈值
         if (*dst_count > 1000) {
             evt->anomaly_type = 1;  // 检测到异常流量
@@ -308,7 +316,10 @@ static inline void detect_anomaly(struct packet_event *evt) {
         
         // 检测 payload 中的可疑模式
         // 简单检查是否包含 shell 命令特征
-        for (int i = 0; i < evt->payload_len - 1 && i < 255; i++) {
+        #pragma unroll
+        for (int i = 0; i < 255; i++) {
+            if (i >= evt->payload_len - 1) break;
+            
             if (evt->payload[i] == '/' && evt->payload[i+1] == 'b') {
                 evt->anomaly_type = 4;  // 可能包含 /bin/sh 等
                 return;
@@ -333,25 +344,40 @@ static inline void detect_anomaly(struct packet_event *evt) {
 
 // 主钩子函数 - 网络过滤器
 int ids_filter(struct __sk_buff *skb) {
-    struct packet_event evt = {};
+    // 使用 Per-CPU Array 避免栈溢出
+    int zero = 0;
+    struct packet_event *evt = packet_event_heap.lookup(&zero);
+    if (!evt) {
+        return 0;
+    }
+    
+    // 重置关键字段 (因为 Map 内存是复用的)
+    evt->src_ip = 0;
+    evt->dst_ip = 0;
+    evt->src_port = 0;
+    evt->dst_port = 0;
+    evt->protocol = 0;
+    evt->anomaly_type = 0;
+    evt->app_proto = 0;
+    evt->payload_len = 0;
     
     // 解析数据包
-    if (parse_packet(skb, &evt) < 0) {
+    if (parse_packet(skb, evt) < 0) {
         return 0;
     }
     
     // 规则匹配
-    int matched = match_rules(&evt);
+    int matched = match_rules(evt);
     
     // 协议分析
-    analyze_protocol(&evt);
+    analyze_protocol(evt);
     
     // 异常检测
-    detect_anomaly(&evt);
+    detect_anomaly(evt);
     
-    if (matched > 0 || evt.anomaly_type > 0) {
+    if (matched > 0 || evt->anomaly_type > 0) {
         inc_counter(DEBUG_EVENTS_SUBMITTED);
-        events.perf_submit(skb, &evt, sizeof(evt));
+        events.perf_submit(skb, evt, sizeof(*evt));
     }
     
     return 0;

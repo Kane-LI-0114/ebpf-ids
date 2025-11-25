@@ -256,6 +256,8 @@ class EventHandler:
                ("dst_port", ct.c_uint16),
                ("protocol", ct.c_uint8),
                ("anomaly_type", ct.c_uint8),
+               ("app_proto", ct.c_uint8),     # 新增
+               ("_pad", ct.c_uint8),          # 填充
                ("payload_len", ct.c_uint32),
                ("payload", ct.c_uint8 * 256)
            ]
@@ -468,6 +470,47 @@ class IDSManager:
            print(f"List of available port: running 'ip link show' for check")
            return False
   
+   def update_kernel_maps(self):
+       """更新内核 Map 中的监控端口"""
+       print("Updating kernel maps with rule ports...")
+       try:
+           monitored_ports = self.bpf.get_table("monitored_ports")
+       except Exception as e:
+           print(f"Warning: Cannot find 'monitored_ports' map: {e}")
+           return
+
+       ports_to_monitor = set()
+       # 添加默认重要端口
+       for p in [21, 22, 80, 443, 8080, 3306, 53]:
+           ports_to_monitor.add(p)
+
+       for rule in self.rule_manager.rules:
+           # rule['dst_port'] is (type, val1, val2)
+           p_type, val1, val2 = rule['dst_port']
+           if p_type == 1: # single
+               ports_to_monitor.add(val1)
+           elif p_type == 2: # range
+               if val2 - val1 < 100:
+                   for p in range(val1, val2 + 1):
+                       ports_to_monitor.add(p)
+               else:
+                   ports_to_monitor.add(val1)
+                   ports_to_monitor.add(val2)
+           elif p_type == 3: # list
+               ports_to_monitor.add(val1)
+               ports_to_monitor.add(val2)
+               
+       count = 0
+       import ctypes as ct
+       for port in ports_to_monitor:
+           if 0 < port <= 65535:
+               try:
+                   monitored_ports[ct.c_uint16(port)] = ct.c_uint8(1)
+                   count += 1
+               except Exception:
+                   pass
+       print(f"✓ Added {count} ports to kernel monitoring map")
+
    def initialize(self):
        """初始化 IDS 系统"""
        print(f"Initialize eBPF IDS system...")
@@ -480,6 +523,9 @@ class IDSManager:
        # 加载 eBPF 程序
        if not self.load_ebpf_program():
            return False
+           
+       # 更新内核 Map
+       self.update_kernel_maps()
       
        # 创建事件处理器
        self.event_handler = EventHandler(self.rule_manager)
