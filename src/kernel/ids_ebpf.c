@@ -24,13 +24,6 @@ struct packet_event {
     __u8 payload[256];
 };
 
-// 定义规则匹配结果结构
-struct match_result {
-    __u32 rule_id;
-    __u32 severity;
-    __u64 timestamp;
-};
-
 // eBPF Maps 定义
 BPF_PERF_OUTPUT(events);
 BPF_HASH(rule_cache, __u32, __u32);
