@@ -26,7 +26,6 @@ struct packet_event {
 
 // eBPF Maps 定义
 BPF_PERF_OUTPUT(events);
-BPF_HASH(rule_cache, __u32, __u32);
 // 使用 LRU Hash 避免内存泄漏
 BPF_TABLE("lru_hash", __u64, __u32, connection_state, 10240);
 // 新增：监控端口 Map，由用户空间动态更新
@@ -170,18 +169,12 @@ static inline int parse_packet(struct __sk_buff *skb, struct packet_event *evt) 
 
 // 规则匹配函数
 static inline int match_rules(struct packet_event *evt) {
-    __u32 key = 0;
-    __u32 *rule_count = rule_cache.lookup(&key);
-    
     // 捕获所有 ICMP 流量（ping）
     if (evt->protocol == IPPROTO_ICMP) {
         inc_counter(DEBUG_ICMP_PACKETS);
         inc_counter(DEBUG_MATCHED_PACKETS);
         return 1;
     }
-    
-    if (!rule_count)
-        return 0;
     
     // 动态端口检查：检查目的端口是否在监控列表中
     if (evt->protocol == IPPROTO_TCP || evt->protocol == IPPROTO_UDP) {
