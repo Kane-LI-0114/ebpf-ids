@@ -280,6 +280,19 @@ class EventHandler:
        # 协议名称映射
        protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
        protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
+
+       # 应用层协议识别 (利用内核 analyze_protocol 的结果)
+       app_proto_map = {
+           1: "HTTP",
+           2: "FTP",
+           3: "SSH",
+           4: "DNS",
+           5: "DHCP"
+       }
+       if event.app_proto > 0:
+           app_name = app_proto_map.get(event.app_proto)
+           if app_name:
+               protocol_name = f"{protocol_name}/{app_name}"
       
        # 调试输出：根据配置决定是否打印
        if debug.enabled:
