@@ -5,7 +5,7 @@
 
 
 """
-eBPF IDS 用户空间管理程序
+eBPF IDS userspace management program
 """
 
 
@@ -26,39 +26,39 @@ from datetime import datetime, timezone
 
 @dataclass
 class DebugConfig:
-   """调试配置"""
-   enabled: bool = False                        # 是否启用调试模式
-   print_interval: int = 100                   # 每 N 个事件打印一次普通流量
-   stats_interval: int = 5                     # 每 N 秒打印一次统计信息
-   ssh_interval: int = 1000                    # SSH 流量每 N 个包打印一次
-   icmp_interval: int = 10                     # ICMP 流量每 N 个包打印一次
+   """Debug configuration"""
+   enabled: bool = False                        # Whether to enable debug mode
+   print_interval: int = 100                   # Print normal traffic every N events
+   stats_interval: int = 5                     # Print statistics every N seconds
+   ssh_interval: int = 1000                    # Print SSH traffic every N packets
+   icmp_interval: int = 10                     # Print ICMP traffic every N packets
    important_ports: list = field(default_factory=lambda: [80, 443, 8080, 21, 23, 3306, 5432])
-   alert_dedup_timeout: int = 10               # 告警去重时间（秒）
+   alert_dedup_timeout: int = 10               # Alert deduplication timeout (seconds)
 
 
 debug = DebugConfig()
 
 
 def get_active_interface():
-   """自动检测活动的网络接口"""
+   """Automatically detect active network interface"""
    try:
-       # 读取 /proc/net/dev 获取所有网络接口
+       # Read /proc/net/dev to get all network interfaces
        with open('/proc/net/dev', 'r', encoding='utf-8') as f:
            lines = f.readlines()
       
        interfaces = []
-       for line in lines[2:]:  # 跳过头两行
+       for line in lines[2:]:  # Skip first two lines
            if ':' in line:
                iface_name = line.split(':')[0].strip()
-               # 排除回环接口
+               # Exclude loopback interface
                if iface_name != 'lo':
                    interfaces.append(iface_name)
       
        if interfaces:
-           # 返回第一个非回环接口
+           # Return first non-loopback interface
            return interfaces[0]
       
-       # 如果没有找到，返回默认值
+       # If not found, return default value
        return 'eth0'
   
    except Exception as e:
@@ -69,19 +69,19 @@ def get_active_interface():
 
 
 class RuleManager:
-   """规则管理器"""
+   """Rule manager"""
   
    def __init__(self, rules_dir):
        self.rules_dir = rules_dir
        self.rules = []
-       self.rules_by_sid = {}  # SID -> 规则映射
+       self.rules_by_sid = {}  # SID -> rule mapping
        self.loaded = False
       
    def load_rules(self):
-       """从规则目录加载规则"""
+       """Load rules from rules directory"""
        from rule_loader import RuleLoader, RuleParser
       
-       print(f"From {self.rules_dir} loading rules...")
+       print(f"Loading rules from {self.rules_dir}...")
       
        loader = RuleLoader(self.rules_dir)
        raw_rules = loader.load_all_rules()
@@ -90,26 +90,26 @@ class RuleManager:
            print("  Warning: Cannot find the rule json")
            return
       
-       print(f"Analyzing {len(raw_rules)} number of rules ...")
+       print(f"Analyzing {len(raw_rules)} rules...")
        self.rules = RuleParser.compile_rules(raw_rules)
       
-       # 建立 SID 索引
+       # Build SID index
        for rule in self.rules:
            sid = rule['sid']
            self.rules_by_sid[sid] = rule
       
-       print(f"✓ Successfully {len(self.rules)} number of rules loaded")
+       print(f"✓ Successfully loaded {len(self.rules)} rules")
        self.loaded = True
       
-       # 打印规则统计
+       # Print rule statistics
        self._print_statistics()
   
    def _print_statistics(self):
-       """打印规则统计信息"""
+       """Print rule statistics"""
        if not self.rules:
            return
       
-       # 统计协议
+       # Count protocols
        protocol_count = {}
        for rule in self.rules:
            proto = rule['protocol']
@@ -117,23 +117,23 @@ class RuleManager:
            protocol_count[proto_name] = protocol_count.get(proto_name, 0) + 1
       
        print("\nRule Summary:")
-       print(f"  Total number of rules: {len(self.rules)}")
+       print(f"  Total rules: {len(self.rules)}")
        print(f"  Rule distribution:")
        for proto, count in sorted(protocol_count.items(), key=lambda x: x[1], reverse=True)[:5]:
            print(f"    - {proto}: {count}")
   
    def get_rule_by_sid(self, sid):
-       """根据 SID 获取规则"""
+       """Get rule by SID"""
        return self.rules_by_sid.get(sid)
   
    def match_rule(self, packet_event):
        """
-       匹配数据包与规则
-       返回: 匹配的规则列表
+       Match packet with rules
+       Returns: list of matched rules
        """
        matched_rules = []
       
-       for rule in self.rules[:100]:  # 先只检查前100条规则（性能优化）
+       for rule in self.rules[:100]:  # Only check first 100 rules (performance optimization)
            if self._match_single_rule(rule, packet_event):
                matched_rules.append(rule)
       
@@ -141,21 +141,21 @@ class RuleManager:
   
    def _match_single_rule(self, rule, event):
        """
-       检查单条规则是否匹配
+       Check if a single rule matches
        """
-       # 1. 匹配协议
+       # 1. Match protocol
        if rule['protocol'] != 0 and rule['protocol'] != event.protocol:
            return False
       
-       # 2. 匹配源端口
+       # 2. Match source port
        if not self._match_port(rule['src_port'], event.src_port):
            return False
       
-       # 3. 匹配目标端口
+       # 3. Match destination port
        if not self._match_port(rule['dst_port'], event.dst_port):
            return False
       
-       # 4. 匹配 content (如果有)
+       # 4. Match content (if any)
        if rule['content'] and len(rule['content']) > 0:
            if not self._match_content(rule['content'], event.payload,
                                       event.payload_len, rule['content_depth']):
@@ -165,7 +165,7 @@ class RuleManager:
   
    def _match_port(self, port_rule, packet_port):
        """
-       匹配端口
+       Match port
        port_rule: (type, value1, value2)
        """
        port_type, val1, val2 = port_rule
@@ -183,35 +183,35 @@ class RuleManager:
   
    def _match_content(self, pattern, payload, payload_len, depth):
        """
-       在 payload 中搜索 pattern
+       Search for pattern in payload
        """
        if payload_len < len(pattern):
            return False
       
        search_len = min(depth, payload_len) if depth > 0 else payload_len
       
-       # 转换 payload 为 bytes
+       # Convert payload to bytes
        payload_bytes = bytes(payload[:payload_len])
       
-       # 在指定深度内搜索
+       # Search within specified depth
        search_area = payload_bytes[:search_len]
        return pattern in search_area
   
    def get_rules(self):
-       """获取所有规则"""
+       """Get all rules"""
        return self.rules
 
 
 
 
 class EventHandler:
-   """事件处理器"""
+   """Event handler"""
   
    def __init__(self, rule_manager):
        self.rule_manager = rule_manager
        self.event_count = 0
        self.alert_count = 0
-       self.last_alerts = {}  # 用于去重：(src_ip, dst_ip, sid) -> timestamp
+       self.last_alerts = {}  # For deduplication: (src_ip, dst_ip, sid) -> timestamp
        self.tcp_count = 0
        self.udp_count = 0
        self.icmp_count = 0
@@ -222,7 +222,7 @@ class EventHandler:
 
    def _log_alert(self, action, protocol, src_ip, src_port,dst_ip, dst_port, options_str):
 
-        # 生成 ISO8601 时间戳，如 2025-11-23T12:04:22+00:00
+        # Generate ISO8601 timestamp, e.g. 2025-11-23T12:04:22+00:00
         now = datetime.now(timezone.utc).isoformat()
 
         line = (
@@ -235,19 +235,19 @@ class EventHandler:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(line)
         except PermissionError:
-            # 如果没有权限写入 /var/log，可以在这里打印一次警告
+            # If no permission to write to /var/log, print a warning
             print(f"[WARN] Cannot write to {self.log_path}, "
                   f"please check permissions (need root).")
         except Exception as e:
             print(f"[WARN] Failed to write alert log: {e}")   
       
    def handle_event(self, cpu, data, size):
-       """处理 eBPF 事件"""
+       """Handle eBPF event"""
        import ctypes as ct
        from datetime import datetime
        import time
       
-       # 定义数据结构以匹配 C 结构体
+       # Define data structure to match C struct
        class PacketEvent(ct.Structure):
            _fields_ = [
                ("src_ip", ct.c_uint32),
@@ -256,8 +256,8 @@ class EventHandler:
                ("dst_port", ct.c_uint16),
                ("protocol", ct.c_uint8),
                ("anomaly_type", ct.c_uint8),
-               ("app_proto", ct.c_uint8),     # 新增
-               ("_pad", ct.c_uint8),          # 填充
+               ("app_proto", ct.c_uint8),     # Application protocol
+               ("_pad", ct.c_uint8),          # Padding
                ("payload_len", ct.c_uint32),
                ("payload", ct.c_uint8 * 256)
            ]
@@ -265,7 +265,7 @@ class EventHandler:
        event = ct.cast(data, ct.POINTER(PacketEvent)).contents
        self.event_count += 1
       
-       # 统计协议
+       # Count protocols
        if event.protocol == 6:
            self.tcp_count += 1
        elif event.protocol == 17:
@@ -273,15 +273,15 @@ class EventHandler:
        elif event.protocol == 1:
            self.icmp_count += 1
       
-       # 格式化 IP 地址
+       # Format IP addresses
        src_ip = self.format_ip(event.src_ip)
        dst_ip = self.format_ip(event.dst_ip)
       
-       # 协议名称映射
+       # Protocol name mapping
        protocol_map = {6: "TCP", 17: "UDP", 1: "ICMP"}
        protocol_name = protocol_map.get(event.protocol, f"Protocol-{event.protocol}")
 
-       # 应用层协议识别 (利用内核 analyze_protocol 的结果)
+       # Application layer protocol identification (using kernel analyze_protocol result)
        app_proto_map = {
            1: "HTTP",
            2: "FTP",
@@ -294,14 +294,14 @@ class EventHandler:
            if app_name:
                protocol_name = f"{protocol_name}/{app_name}"
       
-       # 调试输出：根据配置决定是否打印
+       # Debug output: print based on configuration
        if debug.enabled:
            should_print = False
            if event.protocol == 6:  # TCP
-               # 重要端口立即打印（排除22端口避免SSH刷屏）
+               # Print important ports immediately (exclude port 22 to avoid SSH spam)
                if event.dst_port in debug.important_ports:
                    should_print = True
-               # SSH 端口按配置频率打印
+               # Print SSH port at configured frequency
                elif event.dst_port == 22 and self.tcp_count % debug.ssh_interval == 1:
                    should_print = True
            elif event.protocol == 1:  # ICMP
@@ -310,10 +310,10 @@ class EventHandler:
            if should_print or self.event_count % debug.print_interval == 0:
                print(f"[Testing] Event#{self.event_count} | {protocol_name} | {src_ip}:{event.src_port} -> {dst_ip}:{event.dst_port} | Payload: {event.payload_len}B")
       
-       # 匹配规则
+       # Match rules
        matched_rules = self.rule_manager.match_rule(event)
       
-       # 处理内核检测到的异常
+       # Handle anomalies detected by kernel
        if event.anomaly_type > 0:
            self.alert_count += 1
            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -335,7 +335,7 @@ class EventHandler:
            print(f"Source address: {src_ip}:{event.src_port}")
            print(f"Target address: {dst_ip}:{event.dst_port}")
            print(f"{'='*80}\n")
-           # 记录到 Snort 风格日志
+           # Log to Snort-style log
            anomaly_options = f'msg:"{anomaly_msg}"; anomaly_type:{event.anomaly_type};'
            self._log_alert(
                 action="alert",
@@ -348,20 +348,20 @@ class EventHandler:
             )
 
        if matched_rules:
-           # 有规则匹配，生成告警
+           # Rules matched, generate alerts
            for rule in matched_rules:
-               # 去重检查（同一个源目标对，同一规则，在配置的时间内只告警一次）
+               # Deduplication check (same source-destination pair, same rule, alert only once within configured time)
                alert_key = (event.src_ip, event.dst_ip, rule['sid'])
                current_time = time.time()
               
                if alert_key in self.last_alerts:
                    if current_time - self.last_alerts[alert_key] < debug.alert_dedup_timeout:
-                       continue  # 跳过重复告警
+                       continue  # Skip duplicate alerts
               
                self.last_alerts[alert_key] = current_time
                self.alert_count += 1
               
-               # 打印告警
+               # Print alert
                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                print(f"\n{'='*80}")
                print(f"[ALERT #{self.alert_count}] {timestamp}")
@@ -372,13 +372,13 @@ class EventHandler:
                print(f"Source address: {src_ip}:{event.src_port}")
                print(f"Target address: {dst_ip}:{event.dst_port}")
               
-               # 显示匹配的内容
+               # Show matched content
                if rule['content'] and event.payload_len > 0:
                    print(f"Matched content: {self._format_payload(rule['content'])}")
                    print(f"Packet payload: {self._format_payload(bytes(event.payload[:min(32, event.payload_len)]))}")
               
                print(f"{'='*80}\n")
-               # 组装 Snort 风格 options
+               # Assemble Snort-style options
                options_parts = []
                if "msg" in rule:
                     options_parts.append(f'msg:"{rule["msg"]}"')
@@ -391,8 +391,8 @@ class EventHandler:
 
                options_str = "; ".join(options_parts) + ";"
 
-                # 如果你在 RuleParser 里有原始 option 字符串，例如 rule["options_raw"]，
-                # 可以用下面这一行覆盖上面的拼接：
+                # If you have raw option string in RuleParser, e.g. rule["options_raw"],
+                # you can override the above concatenation with this line:
                 # options_str = rule.get("options_raw", options_str)
 
                self._log_alert(
@@ -405,10 +405,10 @@ class EventHandler:
                     options_str=options_str,
                 )
             
-       # else 分支已被调试输出替代
+       # else branch has been replaced by debug output
   
    def format_ip(self, ip_int):
-       """格式化 IP 地址"""
+       """Format IP address"""
        return ".".join(map(str, [
            ip_int & 0xFF,
            (ip_int >> 8) & 0xFF,
@@ -417,13 +417,13 @@ class EventHandler:
        ]))
   
    def _format_payload(self, data):
-       """格式化 payload 为十六进制和 ASCII"""
+       """Format payload as hexadecimal and ASCII"""
        hex_str = ' '.join(f'{b:02x}' for b in data[:32])
        ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in data[:32])
        return f"{hex_str} | {ascii_str}"
   
    def get_statistics(self):
-       """获取统计信息"""
+       """Get statistics"""
        return {
            'total_events': self.event_count,
            'total_alerts': self.alert_count,
@@ -433,11 +433,11 @@ class EventHandler:
 
 
 class IDSManager:
-   """IDS 主管理类"""
+   """IDS main management class"""
   
    def __init__(self, rules_dir, interface=None):
        self.rules_dir = rules_dir
-       # 如果没有指定接口，自动检测
+       # If no interface specified, auto-detect
        if interface is None:
            self.interface = get_active_interface()
        else:
@@ -447,7 +447,7 @@ class IDSManager:
        self.event_handler = None
       
    def load_ebpf_program(self):
-       """加载 eBPF 程序"""
+       """Load eBPF program"""
        kernel_code_path = os.path.join(
            os.path.dirname(os.path.dirname(__file__)),
            "kernel",
@@ -464,27 +464,27 @@ class IDSManager:
            print("✓ eBPF Compilation Success")
           
        except Exception as e:
-           print(f"✗ load eBPF program fail: {e}")
+           print(f"✗ Failed to load eBPF program: {e}")
            return False
       
        return True
   
    def attach_probes(self):
-       """附加探针到网络接口"""
+       """Attach probes to network interface"""
        try:
-           print(f"Attached eBPF program to the port: {self.interface}")
+           print(f"Attaching eBPF program to interface: {self.interface}")
            function_ids_filter = self.bpf.load_func("ids_filter", BPF.SOCKET_FILTER)
            BPF.attach_raw_socket(function_ids_filter, self.interface)
            print(f"✓ Attached to {self.interface}")
            return True
        except Exception as e:
-           print(f"✗ Attached port fail: {e}")
-           print(f"Reminder: Please ensure the interface '{self.interface}' exist")
-           print(f"List of available port: running 'ip link show' for check")
+           print(f"✗ Failed to attach interface: {e}")
+           print(f"Reminder: Please ensure the interface '{self.interface}' exists")
+           print(f"Available interfaces: run 'ip link show' to check")
            return False
   
    def update_kernel_maps(self):
-       """更新内核 Map 中的监控端口"""
+       """Update monitored ports in kernel map"""
        print("Updating kernel maps with rule ports...")
        try:
            monitored_ports = self.bpf.get_table("monitored_ports")
@@ -493,7 +493,7 @@ class IDSManager:
            return
 
        ports_to_monitor = set()
-       # 添加默认重要端口
+       # Add default important ports
        for p in [21, 22, 80, 443, 8080, 3306, 53]:
            ports_to_monitor.add(p)
 
@@ -525,45 +525,45 @@ class IDSManager:
        print(f"✓ Added {count} ports to kernel monitoring map")
 
    def initialize(self):
-       """初始化 IDS 系统"""
-       print(f"Initialize eBPF IDS system...")
+       """Initialize IDS system"""
+       print(f"Initializing eBPF IDS system...")
        print(f"Rule Directory: {self.rules_dir}")
-       print(f"Network port: {self.interface}")
+       print(f"Network interface: {self.interface}")
       
-       # 加载规则
+       # Load rules
        self.rule_manager.load_rules()
       
-       # 加载 eBPF 程序
+       # Load eBPF program
        if not self.load_ebpf_program():
            return False
            
-       # 更新内核 Map
+       # Update kernel map
        self.update_kernel_maps()
       
-       # 创建事件处理器
+       # Create event handler
        self.event_handler = EventHandler(self.rule_manager)
       
-       # 附加探针
+       # Attach probes
        if not self.attach_probes():
            return False
       
        return True
   
    def start(self):
-       """启动 IDS 监控"""
+       """Start IDS monitoring"""
        if not self.initialize():
-           print("✗ IDS initialize fail, exiting...")
+           print("✗ IDS initialization failed, exiting...")
            return
       
        print("=" * 60)
-       print("✓ eBPF IDS start, start monitoring network...")
+       print("✓ eBPF IDS started, monitoring network...")
        print("=" * 60)
-       print("Press Ctrl+C stop monitoring\n")
+       print("Press Ctrl+C to stop monitoring\n")
       
-       # 打开 perf buffer 并设置回调
+       # Open perf buffer and set callback
        self.bpf["events"].open_perf_buffer(self.event_handler.handle_event)
       
-       # 事件轮询循环
+       # Event polling loop
        import time
        last_stats_time = time.time()
       
@@ -571,68 +571,68 @@ class IDSManager:
            while True:
                self.bpf.perf_buffer_poll(timeout=100)
               
-               # 根据配置定期打印调试统计
+               # Periodically print debug statistics based on configuration
                current_time = time.time()
                if debug.enabled and current_time - last_stats_time >= debug.stats_interval:
                    self._print_debug_stats()
                    last_stats_time = current_time
        except KeyboardInterrupt:
            print("\n" + "=" * 60)
-           print(f"Monitoring stopped, Total capture {self.event_handler.event_count} events")
+           print(f"Monitoring stopped, total captured {self.event_handler.event_count} events")
            print("=" * 60)
   
    def _print_debug_stats(self):
-       """打印调试统计信息"""
+       """Print debug statistics"""
        try:
            debug_map = self.bpf.get_table("debug_counters")
            print("\n" + "="*60)
            print("[Stats] eBPF IDS Debug Statistics:")
-           print(f"  eBPF kernel counter:")
-           print(f"    Overall Network packet: {debug_map[0].value}")
-           print(f"    IP packet: {debug_map[1].value}")
-           print(f"    TCP packet: {debug_map[2].value}")
-           print(f"    UDP packet: {debug_map[3].value}")
-           print(f"    ICMP packet: {debug_map[4].value}")
-           print(f"    Matched packet: {debug_map[5].value}")
-           print(f"    Error analyzed: {debug_map[6].value}")
-           print(f"    Submitted event: {debug_map[7].value}")
-           print(f"  Userspace counter:")
-           print(f"    Accept Event: {self.event_handler.event_count}")
+           print(f"  eBPF kernel counters:")
+           print(f"    Total network packets: {debug_map[0].value}")
+           print(f"    IP packets: {debug_map[1].value}")
+           print(f"    TCP packets: {debug_map[2].value}")
+           print(f"    UDP packets: {debug_map[3].value}")
+           print(f"    ICMP packets: {debug_map[4].value}")
+           print(f"    Matched packets: {debug_map[5].value}")
+           print(f"    Parse errors: {debug_map[6].value}")
+           print(f"    Submitted events: {debug_map[7].value}")
+           print(f"  Userspace counters:")
+           print(f"    Received events: {self.event_handler.event_count}")
            print(f"    TCP: {self.event_handler.tcp_count}")
            print(f"    UDP: {self.event_handler.udp_count}")
            print(f"    ICMP: {self.event_handler.icmp_count}")
-           print(f"    Alert number: {self.event_handler.alert_count}")
+           print(f"    Alerts: {self.event_handler.alert_count}")
            print("="*60 + "\n")
        except Exception as e:
-           print(f"[Test] Cannot read eBPF IDS Debug statistics: {e}")
+           print(f"[Debug] Cannot read eBPF debug statistics: {e}")
   
    def stop(self):
-       """停止 IDS"""
-       print("\nNow stopping IDS...")
+       """Stop IDS"""
+       print("\nStopping IDS...")
       
        if self.event_handler:
            stats = self.event_handler.get_statistics()
            print(f"\nFinal Statistics:")
-           print(f"  Total event: {stats['total_events']}")
-           print(f"  Alert number : {stats['total_alerts']}")
+           print(f"  Total events: {stats['total_events']}")
+           print(f"  Total alerts: {stats['total_alerts']}")
           
-       print("IDS stopped already.")
+       print("IDS stopped.")
 
 
 
 
 def main():
-   """主函数"""
-   # 规则目录路径
+   """Main function"""
+   # Rules directory path
    rules_dir = os.path.join(
        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
        "rules"
    )
   
-   # 创建 IDS 管理器
+   # Create IDS manager
    ids = IDSManager(rules_dir=rules_dir)
   
-   # 设置信号处理
+   # Setup signal handlers
    def signal_handler(sig, frame):
        ids.stop()
        sys.exit(0)
@@ -640,7 +640,7 @@ def main():
    signal.signal(signal.SIGINT, signal_handler)
    signal.signal(signal.SIGTERM, signal_handler)
   
-   # 启动 IDS
+   # Start IDS
    ids.start()
 
 
